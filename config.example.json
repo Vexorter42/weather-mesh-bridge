@@ -1,0 +1,24 @@
+{
+  "location": {
+    "name": "",
+    "country": "",
+    "latitude": null,
+    "longitude": null,
+    "timezone": "auto"
+  },
+  "mesh": {
+    "connection_type": "serial",
+    "device_path": "auto",
+    "tcp_host": "",
+    "tcp_port": 4403,
+    "channel_index": 0,
+    "destination": "broadcast",
+    "chunk_delay": 10
+  },
+  "message": {
+    "language": "ru",
+    "include_header": true,
+    "use_emojis": false
+  },
+  "schedules": []
+}

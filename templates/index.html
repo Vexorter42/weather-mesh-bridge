@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Weather → Heltec Mesh Bridge</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <h1>🌍 Weather → Mesh</h1>
+    <div class="status" id="meshStatus">…</div>
+  </header>
+
+  <nav class="tabs">
+    <button class="tab-btn active" data-tab="settings">⚙️ Настройки</button>
+    <button class="tab-btn" data-tab="chat">💬 Чат <span class="badge" id="chatBadge" hidden>0</span></button>
+  </nav>
+
+  <main>
+    <!-- =================== SETTINGS TAB =================== -->
+    <div class="tab-panel active" data-tab="settings">
+
+      <!-- Location -->
+      <section class="card">
+        <h2>📍 Город</h2>
+        <p class="hint">Поиск работает по любому языку. Выбери из списка — координаты подставятся автоматически.</p>
+        <div class="row">
+          <input type="text" id="cityQuery" placeholder="Например: Москва, Сочи, Berlin…" autocomplete="off">
+          <button id="cityBtn" class="primary">Найти</button>
+        </div>
+        <ul id="cityResults" class="city-list"></ul>
+        <div id="currentCity" class="muted"></div>
+      </section>
+
+      <!-- Message style -->
+      <section class="card">
+        <h2>✉️ Стиль сообщения</h2>
+        <p class="hint">Применяется и к ручной отправке, и к расписанию.</p>
+        <label class="toggle-row">
+          <input type="checkbox" id="useEmojis">
+          <span>Использовать смайлики в сообщениях</span>
+        </label>
+        <label class="toggle-row">
+          <input type="checkbox" id="includeHeader">
+          <span>Добавлять заголовок «Погода — Город»</span>
+        </label>
+      </section>
+
+      <!-- Mesh connection -->
+      <section class="card">
+        <h2>📡 Heltec V4 (Meshtastic)</h2>
+        <label>Тип подключения
+          <select id="connectionType">
+            <option value="serial">USB-кабель</option>
+            <option value="tcp">WiFi (TCP)</option>
+          </select>
+        </label>
+
+        <div id="serialFields">
+          <label>Устройство <small>(auto / /dev/ttyUSB0 / /dev/ttyACM0)</small>
+            <input type="text" id="devicePath" placeholder="auto">
+          </label>
+        </div>
+
+        <div id="tcpFields" class="hidden">
+          <p class="hint">Подключи Heltec к WiFi через приложение Meshtastic (Module Config → MQTT/HTTP/WiFi).
+            Узнай IP в том же приложении или на роутере. Порт по умолчанию 4403.</p>
+          <div class="grid2">
+            <label>IP адрес Heltec
+              <input type="text" id="tcpHost" placeholder="192.168.0.50">
+            </label>
+            <label>Порт
+              <input type="number" id="tcpPort" value="4403">
+            </label>
+          </div>
+        </div>
+
+        <label>Канал <small>(индекс канала Meshtastic, обычно 0)</small>
+          <input type="number" id="channelIndex" min="0" max="7" value="0">
+        </label>
+        <label>Пауза между частями длинного сообщения, сек
+          <small>(LoRa-эфир медленный — для длинных сводок ставь 8–15 сек)</small>
+          <input type="number" id="chunkDelay" min="0" max="120" step="1" value="10">
+        </label>
+        <div class="row">
+          <button id="saveMesh">Сохранить</button>
+          <button id="testConnect" class="ghost">Проверить связь</button>
+        </div>
+      </section>
+
+      <!-- Schedules -->
+      <section class="card">
+        <h2>🕒 Расписание</h2>
+        <p class="hint">Несколько слотов с собственным набором полей. Например: 08:00 — короткая сводка,
+          21:00 — прогноз на завтра (утро и вечер).</p>
+
+        <div id="slots" class="slots"></div>
+
+        <details class="add-slot">
+          <summary>+ Добавить слот</summary>
+          <div class="form">
+            <div class="grid2">
+              <label>Время <input type="time" id="newTime" value="12:00"></label>
+              <label>Часовой пояс
+                <select id="newTz">
+                  <option value="Europe/Moscow" selected>Europe/Moscow (МСК)</option>
+                  <option value="Europe/Kaliningrad">Europe/Kaliningrad</option>
+                  <option value="Asia/Yekaterinburg">Asia/Yekaterinburg</option>
+                  <option value="Asia/Novosibirsk">Asia/Novosibirsk</option>
+                  <option value="Asia/Krasnoyarsk">Asia/Krasnoyarsk</option>
+                  <option value="Asia/Irkutsk">Asia/Irkutsk</option>
+                  <option value="Asia/Vladivostok">Asia/Vladivostok</option>
+                  <option value="Europe/Kyiv">Europe/Kyiv</option>
+                  <option value="Europe/Minsk">Europe/Minsk</option>
+                  <option value="Asia/Almaty">Asia/Almaty</option>
+                  <option value="UTC">UTC</option>
+                </select>
+              </label>
+            </div>
+            <div class="dow" id="newDays"></div>
+            <div class="fields" id="newFields"></div>
+            <button id="createSlot" class="primary">Создать слот</button>
+          </div>
+        </details>
+      </section>
+
+      <!-- Manual send -->
+      <section class="card">
+        <h2>🚀 Отправить сейчас</h2>
+        <div class="fields" id="manualFields"></div>
+        <div class="row">
+          <button id="previewBtn" class="ghost">Предпросмотр</button>
+          <button id="sendBtn" class="primary">Отправить</button>
+        </div>
+        <pre id="previewBox" class="preview"></pre>
+      </section>
+    </div>
+
+    <!-- =================== CHAT TAB =================== -->
+    <div class="tab-panel" data-tab="chat">
+      <section class="card chat-card">
+        <h2>💬 Чат mesh-сети</h2>
+        <p class="hint">
+          Здесь видны последние ~200 сообщений в каналах, которые слышит твоя нода.
+          Чтобы что-то получать — нода должна быть подключена (зелёная плашка вверху).
+        </p>
+        <div class="notif-bar">
+          <label class="toggle-row">
+            <input type="checkbox" id="notifEnabled">
+            <span>Уведомлять о новых сообщениях</span>
+          </label>
+          <button id="notifPermBtn" class="ghost" hidden>Запросить разрешение браузера</button>
+          <span id="notifStatus" class="muted"></span>
+        </div>
+        <div id="chatLog" class="chat-log">
+          <div class="chat-empty muted">Сообщений пока нет — подключись к ноде и попроси кого-нибудь написать.</div>
+        </div>
+        <div id="replyTo" class="reply-to-bar" hidden>
+          <div class="reply-to-content">
+            <span class="reply-to-label">↪ Ответ для</span>
+            <strong class="reply-to-name"></strong>
+            <span class="reply-to-preview muted"></span>
+          </div>
+          <button class="reply-to-cancel ghost" title="Отменить ответ">✕</button>
+        </div>
+        <div class="row chat-compose">
+          <input type="text" id="chatInput" placeholder="Написать в mesh…">
+          <button id="chatSend" class="primary">Отправить</button>
+        </div>
+        <div class="muted chat-hint">Сообщение уйдёт broadcast'ом на канал, выбранный в настройках Heltec.</div>
+      </section>
+    </div>
+  </main>
+
+  <div id="toast" class="toast"></div>
+
+  <template id="slotTemplate">
+    <div class="slot" data-id="">
+      <div class="slot-head">
+        <label class="switch">
+          <input type="checkbox" class="enabled">
+          <span></span>
+        </label>
+        <input type="time" class="time">
+        <select class="tz">
+          <option value="Europe/Moscow">Europe/Moscow</option>
+          <option value="Europe/Kaliningrad">Europe/Kaliningrad</option>
+          <option value="Asia/Yekaterinburg">Asia/Yekaterinburg</option>
+          <option value="Asia/Novosibirsk">Asia/Novosibirsk</option>
+          <option value="Asia/Krasnoyarsk">Asia/Krasnoyarsk</option>
+          <option value="Asia/Irkutsk">Asia/Irkutsk</option>
+          <option value="Asia/Vladivostok">Asia/Vladivostok</option>
+          <option value="Europe/Kyiv">Europe/Kyiv</option>
+          <option value="Europe/Minsk">Europe/Minsk</option>
+          <option value="Asia/Almaty">Asia/Almaty</option>
+          <option value="UTC">UTC</option>
+        </select>
+        <button class="delete ghost" title="Удалить">✕</button>
+      </div>
+      <div class="dow"></div>
+      <div class="fields"></div>
+      <div class="slot-foot muted next-run"></div>
+    </div>
+  </template>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

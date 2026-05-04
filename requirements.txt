@@ -1,0 +1,7 @@
+flask>=3.0.0
+requests>=2.31.0
+apscheduler>=3.10.4
+meshtastic>=2.3.0
+pypubsub>=4.0.3
+pyserial>=3.5
+cryptography>=42.0.0

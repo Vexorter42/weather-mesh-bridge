@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual env
+.venv/
+venv/
+env/
+
+# Local runtime artefacts
+*.log
+*.tmp
+nohup.out
+config.json.tmp
+
+# Editor / OS junk
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Persistent personal config (см. config.example.json)
+config.json
+
+# TLS certificates (auto-generated, не должны попадать в репозиторий)
+tls/
+*.pem
+*.key
