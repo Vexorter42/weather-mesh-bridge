@@ -69,7 +69,18 @@ async function api(path, opts = {}) {
 }
 
 // ---------- Tabs ----------
-let CURRENT_TAB = "settings";
+let CURRENT_TAB = "home";
+
+// Format a unix timestamp as a relative-ago string in Russian.
+function relTime(ts) {
+  if (!ts) return "—";
+  const sec = Math.max(0, Math.floor(Date.now() / 1000 - Number(ts)));
+  if (sec < 60) return `${sec} с назад`;
+  if (sec < 3600) return `${Math.floor(sec / 60)} мин назад`;
+  if (sec < 86400) return `${Math.floor(sec / 3600)} ч назад`;
+  const days = Math.floor(sec / 86400);
+  return `${days} ${days === 1 ? "день" : (days < 5 ? "дня" : "дней")} назад`;
+}
 $$(".tab-btn").forEach(btn => {
   btn.addEventListener("click", () => {
     CURRENT_TAB = btn.dataset.tab;
@@ -80,9 +91,95 @@ $$(".tab-btn").forEach(btn => {
       badge.hidden = true; badge.textContent = "0";
       const log = $("#chatLog");
       requestAnimationFrame(() => { log.scrollTop = log.scrollHeight; });
+    } else if (CURRENT_TAB === "home") {
+      refreshDashboard();
     }
   });
 });
+
+// ---------- Dashboard ----------
+let KNOWN_NODES = [];     // last fetched node list (for DM picker)
+
+async function refreshDashboard() {
+  try {
+    const [stats, nodes] = await Promise.all([
+      api("/api/stats"),
+      api("/api/nodes").catch(() => []),
+    ]);
+    KNOWN_NODES = Array.isArray(nodes) ? nodes : [];
+    renderDashboard(stats, KNOWN_NODES);
+    populateDestinationSelectors(KNOWN_NODES);
+  } catch (e) { /* silent — dashboard isn't critical */ }
+}
+
+function renderDashboard(s, nodes) {
+  const conn = $("#statConn");
+  if (s.mesh_connected) {
+    conn.textContent = "Подключено";
+    conn.className = "stat-value good";
+  } else {
+    conn.textContent = "Нет связи";
+    conn.className = "stat-value bad";
+  }
+  $("#statConnSub").textContent = s.mesh_connected ? "Heltec на связи" : "Проверь настройки";
+  $("#statNodes").textContent = s.mesh_nodes_known ?? "—";
+  $("#statSenders").textContent = s.unique_senders_24h ?? 0;
+  $("#statTotal").textContent = s.total_messages ?? 0;
+  $("#statSent").textContent = s.sent_24h ?? 0;
+  $("#statRecv").textContent = s.received_24h ?? 0;
+  $("#statRssi").textContent = s.avg_rssi_24h != null ? `${s.avg_rssi_24h} dBm` : "—";
+  $("#statHops").textContent = s.avg_hops_24h != null ? s.avg_hops_24h.toFixed(1) : "—";
+  $("#statLastOut").textContent = relTime(s.last_outgoing_ts);
+  $("#statLastIn").textContent = relTime(s.last_incoming_ts);
+
+  const wrap = $("#nodesList");
+  wrap.innerHTML = "";
+  if (!nodes.length) {
+    wrap.innerHTML = "<div class='muted'>Список пуст — нода ещё никого не слышала.</div>";
+    return;
+  }
+  for (const n of nodes) {
+    const row = document.createElement("div");
+    row.className = "node-row";
+    const long = n.long_name || n.node_id || "?";
+    const short = n.short_name ? `<span class="node-short">[${escapeHtml(n.short_name)}]</span>` : "";
+    const age = n.last_heard ? relTime(n.last_heard) : "—";
+    const snr = n.snr != null ? `<span class="node-snr">SNR ${Number(n.snr).toFixed(1)}</span>` : "";
+    row.innerHTML =
+      `<div><span class="node-name">${escapeHtml(long)}</span>${short}</div>` +
+      `<div class="node-age">${age}</div>` +
+      `<div>${snr}</div>`;
+    wrap.appendChild(row);
+  }
+}
+
+function populateDestinationSelectors(nodes) {
+  // Helper to repopulate any <select> while preserving its current value.
+  function fill(selectEl) {
+    if (!selectEl) return;
+    const prev = selectEl.value;
+    selectEl.innerHTML = '<option value="broadcast">📢 Broadcast</option>';
+    for (const n of nodes) {
+      const opt = document.createElement("option");
+      opt.value = n.node_id || `!${(n.num >>> 0).toString(16)}`;
+      const long = n.long_name || n.node_id;
+      const short = n.short_name ? ` [${n.short_name}]` : "";
+      opt.textContent = `👤 ${long}${short}`;
+      selectEl.appendChild(opt);
+    }
+    // Restore previous selection (if still valid) or keep broadcast
+    if (prev && Array.from(selectEl.options).some(o => o.value === prev)) {
+      selectEl.value = prev;
+    }
+  }
+  fill($("#chatDestination"));
+  // Update every per-slot dropdown too
+  $$(".slot .dest").forEach(sel => {
+    const prev = sel.value;
+    fill(sel);
+    if (prev) sel.value = prev;
+  });
+}
 
 // ---------- Mesh status ----------
 async function refreshMeshStatus() {
@@ -158,11 +255,13 @@ async function saveMessageStyle() {
     use_emojis: $("#useEmojis").checked,
     include_header: $("#includeHeader").checked,
   };
-  CONFIG = await api("/api/config", { method: "POST", body: { message } });
-  toast("Стиль сообщений сохранён", "ok");
+  const cmds = { enabled: $("#commandsEnabled").checked };
+  CONFIG = await api("/api/config", { method: "POST", body: { message, commands: cmds } });
+  toast("Сохранено", "ok");
 }
 $("#useEmojis").addEventListener("change", saveMessageStyle);
 $("#includeHeader").addEventListener("change", saveMessageStyle);
+$("#commandsEnabled").addEventListener("change", saveMessageStyle);
 
 // ---------- Mesh form ----------
 function updateConnectionFields() {
@@ -257,6 +356,19 @@ async function refreshSlots() {
     $(".enabled", node).checked = !!s.enabled;
     $(".time", node).value = s.time || "12:00";
     $(".tz", node).value = s.timezone || "Europe/Moscow";
+    // Destination select — fill with known nodes, then restore slot's value.
+    populateDestinationSelectors(KNOWN_NODES);
+    const destSel = $(".dest", node);
+    // Make sure the saved value is selectable even if the node hasn't been
+    // heard since boot (e.g. configured DM target that's currently offline).
+    const desired = s.destination || "broadcast";
+    if (desired !== "broadcast" && !Array.from(destSel.options).some(o => o.value === desired)) {
+      const opt = document.createElement("option");
+      opt.value = desired;
+      opt.textContent = `👤 ${desired} (вне связи)`;
+      destSel.appendChild(opt);
+    }
+    destSel.value = desired;
     buildDayButtons($(".dow", node), s.days || DAYS.map(d => d.k));
     buildFieldChips($(".fields", node), s.fields || []);
     const job = jobMap[`slot-${s.id}`];
@@ -275,6 +387,7 @@ async function refreshSlots() {
         timezone: $(".tz", node).value,
         days: readDays($(".dow", node)),
         fields: readFields($(".fields", node)),
+        destination: $(".dest", node).value || "broadcast",
       };
       try {
         await api(`/api/schedules/${s.id}`, { method: "PATCH", body: payload });
@@ -287,6 +400,22 @@ async function refreshSlots() {
     $(".tz", node).addEventListener("change", save);
     $(".dow", node).addEventListener("click", (e) => { if (e.target.tagName === "BUTTON") save(); });
     $(".fields", node).addEventListener("change", save);
+    $(".dest", node).addEventListener("change", save);
+    $(".run-now", node).addEventListener("click", async () => {
+      const btn = $(".run-now", node);
+      btn.disabled = true;
+      btn.textContent = "…";
+      try {
+        const res = await api(`/api/schedules/${s.id}/run`, { method: "POST" });
+        const parts = res.chunks > 1 ? `, частей: ${res.chunks}` : "";
+        toast(`Слот отправлен · ${res.chars} симв.${parts}`, "ok");
+      } catch (e) {
+        toast(e.message, "err");
+      } finally {
+        btn.disabled = false;
+        btn.textContent = "▶";
+      }
+    });
     $(".delete", node).addEventListener("click", async () => {
       if (!confirm(`Удалить слот ${s.time}?`)) return;
       await api(`/api/schedules/${s.id}`, { method: "DELETE" });
@@ -687,6 +816,7 @@ $("#replyTo .reply-to-cancel").addEventListener("click", cancelReply);
 $("#chatSend").addEventListener("click", async () => {
   const text = $("#chatInput").value.trim();
   if (!text) return;
+  const destination = $("#chatDestination")?.value || "broadcast";
   try {
     if (REPLY_TO) {
       await api("/api/chat/reply", {
@@ -695,7 +825,10 @@ $("#chatSend").addEventListener("click", async () => {
       });
       cancelReply();
     } else {
-      await api("/api/chat/send", { method: "POST", body: { text } });
+      await api("/api/chat/send", {
+        method: "POST",
+        body: { text, destination },
+      });
     }
     $("#chatInput").value = "";
     pollChat();
@@ -718,6 +851,7 @@ async function init() {
   $("#chunkDelay").value = CONFIG.mesh?.chunk_delay ?? 10;
   $("#useEmojis").checked = !!CONFIG.message?.use_emojis;
   $("#includeHeader").checked = CONFIG.message?.include_header !== false;
+  $("#commandsEnabled").checked = CONFIG.commands?.enabled !== false;
   updateConnectionFields();
   renderCurrentCity();
   buildDayButtons($("#newDays"), DAYS.map(d => d.k));
@@ -727,7 +861,11 @@ async function init() {
   refreshMeshStatus();
   refreshNotifUi();
   pollChat();
+  refreshDashboard();
   setInterval(refreshMeshStatus, 15000);
   setInterval(pollChat, 4000);
+  setInterval(() => {
+    if (CURRENT_TAB === "home") refreshDashboard();
+  }, 30000);
 }
 init().catch(e => toast(e.message, "err"));

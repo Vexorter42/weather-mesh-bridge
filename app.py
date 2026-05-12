@@ -10,16 +10,19 @@ import json
 import logging
 import os
 import threading
+import time
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from flask import Flask, jsonify, render_template, request
 
+import commands
 import weather
+from chat_db import ChatDb
 from meshbridge import MeshBridge
 
 logging.basicConfig(
@@ -87,6 +90,7 @@ def load_config() -> dict[str, Any]:
                 "chunk_delay": 10,
             },
             "message": {"language": "ru", "include_header": True, "use_emojis": False},
+            "commands": {"enabled": True},
             "schedules": [],
         }
     with CONFIG_PATH.open("r", encoding="utf-8") as f:
@@ -110,19 +114,46 @@ def save_config(cfg: dict[str, Any]) -> None:
 
 CONFIG = load_config()
 _mesh_cfg = CONFIG.get("mesh", {}) or {}
+
+# Persistent chat store — SQLite DB next to config.json.
+CHAT_DB = ChatDb(BASE_DIR / "chat.db")
+
 BRIDGE = MeshBridge(
     connection_type=_mesh_cfg.get("connection_type", "serial"),
     device_path=_mesh_cfg.get("device_path", "auto"),
     tcp_host=_mesh_cfg.get("tcp_host", ""),
     tcp_port=int(_mesh_cfg.get("tcp_port", 4403)),
+    chat_db=CHAT_DB,
 )
+
+
+def _handle_mesh_command(msg: dict[str, Any]) -> Optional[str]:
+    """MeshBridge callback for incoming text packets that look like commands."""
+    cfg = load_config()
+    enabled = bool((cfg.get("commands") or {}).get("enabled", True))
+    if not enabled:
+        return None
+    return commands.handle(msg, bridge=BRIDGE, cfg=cfg)
+
+
+BRIDGE.set_command_handler(_handle_mesh_command)
 
 scheduler = BackgroundScheduler(timezone="UTC")  # cron triggers carry their own tz
 scheduler.start()
 
 
+# How robust the scheduler is when a slot fires.
+PRE_CHECK_OFFSET_SECONDS = 10     # за 10 сек до сработки прогреваем соединение
+SLOT_SEND_RETRY_ATTEMPTS = 3      # сколько раз пытаться отправить
+SLOT_SEND_RETRY_DELAY_SEC = 15    # пауза между попытками
+
+
 def _job_id(slot_id: str) -> str:
     return f"slot-{slot_id}"
+
+
+def _precheck_job_id(slot_id: str) -> str:
+    return f"precheck-{slot_id}"
 
 
 def _trigger_for_slot(slot: dict[str, Any]) -> CronTrigger:
@@ -133,30 +164,106 @@ def _trigger_for_slot(slot: dict[str, Any]) -> CronTrigger:
     return CronTrigger(hour=int(hh), minute=int(mm), day_of_week=day_of_week, timezone=tz)
 
 
+def _trigger_for_pre_check(slot: dict[str, Any], offset_seconds: int = PRE_CHECK_OFFSET_SECONDS):
+    """Cron trigger that fires offset_seconds before the slot's main time.
+
+    Returns None for slots so close to midnight that the pre-check would cross
+    into the previous day (e.g. 00:00 slot → 23:59:50 previous day requires
+    day-of-week shift, which we skip for simplicity).
+    """
+    hh, mm = slot.get("time", "12:00").split(":")
+    days = slot.get("days") or DAYS_ORDER
+    day_of_week = ",".join(d for d in days if d in DAYS_ORDER) or "mon-sun"
+    tz = slot.get("timezone") or "Europe/Moscow"
+
+    total = int(hh) * 3600 + int(mm) * 60 - int(offset_seconds)
+    if total < 0:
+        return None  # crosses midnight, skip pre-check
+
+    return CronTrigger(
+        hour=(total // 3600) % 24,
+        minute=(total // 60) % 60,
+        second=total % 60,
+        day_of_week=day_of_week,
+        timezone=tz,
+    )
+
+
+def _slot_pre_check(slot_id: str):
+    """Warm up the mesh connection so the main send can fire immediately."""
+    try:
+        cfg = load_config()
+        mesh_cfg = cfg.get("mesh", {}) or {}
+        BRIDGE.configure(mesh_cfg)
+        status = BRIDGE.connect()
+        if status.get("connected"):
+            log.info(
+                "Slot %s pre-check OK (target=%s, nodes=%s)",
+                slot_id,
+                status.get("resolved_path") or status.get("tcp_host"),
+                status.get("nodes_known", "?"),
+            )
+        else:
+            log.warning(
+                "Slot %s pre-check: связи нет (%s). Попробую переоткрыть на основной сработке.",
+                slot_id, status.get("error", "unknown"),
+            )
+    except Exception:
+        log.exception("Slot %s pre-check crashed", slot_id)
+
+
 def _run_slot(slot_id: str):
-    """APScheduler entry point — re-reads config so live edits stick."""
+    """APScheduler entry point — re-reads config so live edits stick.
+
+    Tries up to SLOT_SEND_RETRY_ATTEMPTS times; between retries closes/reopens
+    the mesh interface (most send failures are stale-socket / no-route-to-host).
+    """
     cfg = load_config()
     slot = next((s for s in cfg.get("schedules", []) if s.get("id") == slot_id), None)
     if not slot or not slot.get("enabled", True):
         log.info("Slot %s skipped (missing or disabled)", slot_id)
         return
-    try:
-        send_now(cfg, slot.get("fields") or [])
-        log.info("Slot %s sent", slot_id)
-    except Exception:
-        log.exception("Slot %s failed", slot_id)
+
+    fields = slot.get("fields") or []
+    destination = slot.get("destination") or None  # None = use global mesh.destination
+    last_err = None
+    for attempt in range(1, SLOT_SEND_RETRY_ATTEMPTS + 1):
+        try:
+            send_now(cfg, fields, destination=destination)
+            log.info("Slot %s sent (attempt %d/%d)", slot_id, attempt, SLOT_SEND_RETRY_ATTEMPTS)
+            return
+        except Exception as exc:
+            last_err = exc
+            log.warning(
+                "Slot %s attempt %d/%d failed: %s",
+                slot_id, attempt, SLOT_SEND_RETRY_ATTEMPTS, exc,
+            )
+            if attempt < SLOT_SEND_RETRY_ATTEMPTS:
+                time.sleep(SLOT_SEND_RETRY_DELAY_SEC)
+                # пересоздаём соединение перед следующей попыткой
+                try:
+                    BRIDGE.close()
+                    BRIDGE.connect()
+                except Exception:
+                    log.exception("Slot %s reconnect before retry failed", slot_id)
+    log.error(
+        "Slot %s gave up after %d attempts. Last error: %s",
+        slot_id, SLOT_SEND_RETRY_ATTEMPTS, last_err,
+    )
 
 
 def reschedule_all():
     cfg = load_config()
-    # remove every job that we own
+    # remove every job that we own (main + pre-check)
     for job in list(scheduler.get_jobs()):
-        if job.id.startswith("slot-"):
+        if job.id.startswith("slot-") or job.id.startswith("precheck-"):
             scheduler.remove_job(job.id)
+
     for slot in cfg.get("schedules", []):
         if not slot.get("enabled", True):
             continue
         try:
+            # Main send job at slot time
             scheduler.add_job(
                 _run_slot,
                 _trigger_for_slot(slot),
@@ -168,6 +275,18 @@ def reschedule_all():
                 misfire_grace_time=3600,
                 coalesce=True,
             )
+            # Pre-check job 10 seconds before the slot — warms up mesh link
+            pre_trigger = _trigger_for_pre_check(slot)
+            if pre_trigger is not None:
+                scheduler.add_job(
+                    _slot_pre_check,
+                    pre_trigger,
+                    args=[slot["id"]],
+                    id=_precheck_job_id(slot["id"]),
+                    replace_existing=True,
+                    misfire_grace_time=60,
+                    coalesce=True,
+                )
         except Exception:
             log.exception("Failed to schedule slot %s", slot.get("id"))
 
@@ -200,16 +319,18 @@ def _chunk_delay(mesh_cfg: dict[str, Any]) -> float:
     return max(0.0, min(v, 120.0))
 
 
-def send_now(cfg: dict[str, Any], fields: list[str]) -> dict[str, Any]:
+def send_now(cfg: dict[str, Any], fields: list[str], destination: Optional[str] = None) -> dict[str, Any]:
     text = build_message(cfg, fields)
     mesh_cfg = cfg.get("mesh", {}) or {}
     BRIDGE.configure(mesh_cfg)
+    if not destination:
+        destination = mesh_cfg.get("destination") or "broadcast"
     # send_text_chunked auto-splits sequences longer than the Meshtastic ~228-byte
     # limit and prefixes each chunk with "(i/N) ".
     result = BRIDGE.send_text_chunked(
         text,
         channel_index=int(mesh_cfg.get("channel_index", 0)),
-        destination=mesh_cfg.get("destination", "broadcast"),
+        destination=destination,
         chunk_delay=_chunk_delay(mesh_cfg),
     )
     result["text"] = text
@@ -245,6 +366,8 @@ def api_set_config():
             cfg["mesh"] = {**cfg.get("mesh", {}), **payload["mesh"]}
         if "message" in payload:
             cfg["message"] = {**cfg.get("message", {}), **payload["message"]}
+        if "commands" in payload:
+            cfg["commands"] = {**cfg.get("commands", {}), **payload["commands"]}
         save_config(cfg)
     BRIDGE.configure(cfg.get("mesh", {}) or {})
     reschedule_all()
@@ -277,6 +400,7 @@ def api_create_schedule():
         "days": payload.get("days") or DAYS_ORDER,
         "fields": _migrate_fields(payload.get("fields")) or ["temp", "feels", "humidity", "pressure", "wind", "precipitation", "forecast"],
         "timezone": payload.get("timezone") or "Europe/Moscow",
+        "destination": payload.get("destination") or "broadcast",
     }
     with _cfg_lock:
         cfg = load_config()
@@ -295,7 +419,7 @@ def api_update_schedule(slot_id: str):
         target = next((s for s in slots if s.get("id") == slot_id), None)
         if not target:
             return jsonify({"error": "not found"}), 404
-        for k in ("time", "enabled", "days", "fields", "timezone"):
+        for k in ("time", "enabled", "days", "fields", "timezone", "destination"):
             if k in payload:
                 if k == "fields":
                     target[k] = _migrate_fields(payload[k])
@@ -304,6 +428,21 @@ def api_update_schedule(slot_id: str):
         save_config(cfg)
     reschedule_all()
     return jsonify(target)
+
+
+@app.route("/api/schedules/<slot_id>/run", methods=["POST"])
+def api_run_schedule_now(slot_id: str):
+    """Run a slot's payload immediately, regardless of its scheduled time."""
+    cfg = load_config()
+    slot = next((s for s in cfg.get("schedules", []) if s.get("id") == slot_id), None)
+    if not slot:
+        return jsonify({"error": "Слот не найден"}), 404
+    try:
+        result = send_now(cfg, slot.get("fields") or [], destination=slot.get("destination") or None)
+    except Exception as exc:
+        log.exception("Manual run of slot %s failed", slot_id)
+        return jsonify({"error": str(exc)}), 500
+    return jsonify(result)
 
 
 @app.route("/api/schedules/<slot_id>", methods=["DELETE"])
@@ -426,7 +565,12 @@ def api_chat_react():
 
 @app.route("/api/chat/send", methods=["POST"])
 def api_chat_send():
-    """Send a free-form text message into the mesh (broadcast on configured channel)."""
+    """Send a free-form text message into the mesh.
+
+    payload:
+      - text (str, required)
+      - destination (str, optional): "broadcast" or node id (e.g. "!a1b2c3d4").
+    """
     payload = request.get_json(force=True, silent=True) or {}
     text = (payload.get("text") or "").strip()
     if not text:
@@ -434,11 +578,14 @@ def api_chat_send():
     cfg = load_config()
     mesh_cfg = cfg.get("mesh", {}) or {}
     BRIDGE.configure(mesh_cfg)
+    destination = (payload.get("destination") or mesh_cfg.get("destination") or "broadcast").strip()
+    if not destination:
+        destination = "broadcast"
     try:
         result = BRIDGE.send_text_chunked(
             text,
             channel_index=int(mesh_cfg.get("channel_index", 0)),
-            destination=mesh_cfg.get("destination", "broadcast"),
+            destination=destination,
             chunk_delay=_chunk_delay(mesh_cfg),
         )
     except Exception as exc:
@@ -446,20 +593,37 @@ def api_chat_send():
     return jsonify(result)
 
 
+@app.route("/api/nodes", methods=["GET"])
+def api_nodes():
+    """List nodes known by the connected Heltec — for DM picker and stats."""
+    return jsonify(BRIDGE.get_known_nodes())
+
+
 @app.route("/api/scheduler/jobs", methods=["GET"])
 def api_jobs():
     out = []
     for job in scheduler.get_jobs():
-        if not job.id.startswith("slot-"):
+        if not (job.id.startswith("slot-") or job.id.startswith("precheck-")):
             continue
         out.append(
             {
                 "id": job.id,
+                "kind": "precheck" if job.id.startswith("precheck-") else "slot",
                 "next_run": job.next_run_time.isoformat() if job.next_run_time else None,
                 "trigger": str(job.trigger),
             }
         )
     return jsonify(out)
+
+
+@app.route("/api/stats", methods=["GET"])
+def api_stats():
+    """Aggregate counters for the main-page dashboard."""
+    s = CHAT_DB.stats()
+    mesh = BRIDGE.status()
+    s["mesh_connected"] = bool(mesh.get("connected"))
+    s["mesh_nodes_known"] = mesh.get("nodes_known")
+    return jsonify(s)
 
 
 @app.route("/api/health", methods=["GET"])

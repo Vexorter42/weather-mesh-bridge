@@ -187,6 +187,9 @@ button.primary:hover { background: var(--accent-2); border-color: var(--accent-2
 button.ghost { background: transparent; }
 button.delete { color: var(--danger); border-color: transparent; }
 button.delete:hover { border-color: var(--danger); }
+button.run-now { color: var(--good); border-color: transparent; font-size: 0.95rem; padding: 6px 9px; }
+button.run-now:hover { border-color: var(--good); }
+button.run-now:disabled { opacity: 0.5; cursor: wait; }
 
 .city-list {
   list-style: none;
@@ -329,6 +332,66 @@ button.delete:hover { border-color: var(--danger); }
   font-size: 0.88rem;
   min-height: 1.5em;
 }
+
+.stats-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 10px;
+  margin-top: 6px;
+}
+@media (max-width: 540px) { .stats-grid { grid-template-columns: 1fr; } }
+.stat {
+  background: var(--card-2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 12px;
+}
+.stat-label { color: var(--muted); font-size: 0.8rem; }
+.stat-value { font-size: 1.6rem; font-weight: 600; line-height: 1.2; margin: 2px 0; }
+.stat-value.good { color: var(--good); }
+.stat-value.bad  { color: var(--danger); }
+.stat-value.ok   { color: var(--accent); }
+.stat-sub { color: var(--muted); font-size: 0.75rem; }
+
+.activity-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 4px;
+  border-bottom: 1px solid var(--border);
+}
+.activity-row:last-child { border-bottom: none; }
+.activity-label { color: var(--muted); font-size: 0.9rem; }
+.activity-value { color: var(--text); font-variant-numeric: tabular-nums; }
+
+.nodes-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 8px;
+  max-height: 360px;
+  overflow-y: auto;
+}
+.nodes-list .node-row {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  gap: 8px;
+  align-items: center;
+  padding: 6px 10px;
+  background: var(--card-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 0.88rem;
+}
+.nodes-list .node-name { color: var(--text); font-weight: 500; word-break: break-word; }
+.nodes-list .node-short { color: var(--muted); font-size: 0.78rem; margin-left: 6px; }
+.nodes-list .node-age { color: var(--muted); font-size: 0.78rem; font-variant-numeric: tabular-nums; }
+.nodes-list .node-snr { font-size: 0.78rem; padding: 1px 7px; border: 1px solid var(--border); border-radius: 999px; }
+
+.chat-dest { max-width: 200px; }
+.slot-dest-row { margin-top: 10px; }
+.slot-dest-row label { font-size: 0.82rem; color: var(--muted); }
+.slot-dest-row select { width: 100%; }
 
 .chat-card { padding-bottom: 14px; }
 .notif-bar {

@@ -17,13 +17,11 @@ import glob
 import logging
 import threading
 import time
-from collections import deque
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 log = logging.getLogger(__name__)
 
 DEFAULT_TCP_PORT = 4403
-MESSAGE_BUFFER_SIZE = 200
 
 # Meshtastic firmware caps a single text packet around 228 bytes of UTF-8 payload.
 # We keep some headroom for protocol overhead and for the "(N/M) " prefix when chunking.
@@ -112,6 +110,8 @@ class MeshBridge:
         device_path: str = "auto",
         tcp_host: str = "",
         tcp_port: int = DEFAULT_TCP_PORT,
+        chat_db: Any = None,                                   # ChatDb instance
+        command_handler: Optional[Callable[[dict], Optional[str]]] = None,
     ):
         self._connection_type = connection_type or "serial"
         self._device_path = device_path or "auto"
@@ -120,11 +120,20 @@ class MeshBridge:
         self._iface = None
         self._lock = threading.Lock()
 
-        # rolling chat buffer
-        self._messages: deque[dict[str, Any]] = deque(maxlen=MESSAGE_BUFFER_SIZE)
+        # persistent chat history
+        self._db = chat_db
         self._msg_lock = threading.Lock()
-        self._msg_counter = 0
         self._pubsub_subscribed = False
+
+        # optional callback: gets the message dict, returns text to send back
+        # (used for the !commands feature). Called in a background thread.
+        self._command_handler = command_handler
+
+    def set_chat_db(self, db: Any) -> None:
+        self._db = db
+
+    def set_command_handler(self, fn: Optional[Callable[[dict], Optional[str]]]) -> None:
+        self._command_handler = fn
 
     # ------------------------------------------------------------------
     # Configuration
@@ -292,25 +301,25 @@ class MeshBridge:
         rx_rssi: Optional[float] = None,
         rx_snr: Optional[float] = None,
     ) -> dict[str, Any]:
-        with self._msg_lock:
-            self._msg_counter += 1
-            msg = {
-                "id": self._msg_counter,
-                "time": int(time.time()),
-                "from_id": from_id,
-                "from_name": from_name,
-                "channel": int(channel or 0),
-                "text": text,
-                "incoming": incoming,
-                "msg_id": msg_id if msg_id else None,
-                "reply_to": reply_to if reply_to else None,
-                "is_reaction": bool(is_reaction),
-                "hops_taken": hops_taken,
-                "rx_rssi": rx_rssi,
-                "rx_snr": rx_snr,
-            }
-            self._messages.append(msg)
+        msg = {
+            "time": int(time.time()),
+            "from_id": from_id,
+            "from_name": from_name,
+            "channel": int(channel or 0),
+            "text": text,
+            "incoming": incoming,
+            "msg_id": msg_id if msg_id else None,
+            "reply_to": reply_to if reply_to else None,
+            "is_reaction": bool(is_reaction),
+            "hops_taken": hops_taken,
+            "rx_rssi": rx_rssi,
+            "rx_snr": rx_snr,
+        }
+        if self._db is None:
+            log.warning("ChatDb is not set on MeshBridge; message will be dropped")
             return msg
+        with self._msg_lock:
+            return self._db.add(msg)
 
     def _on_text_received(self, packet=None, interface=None):
         try:
@@ -368,7 +377,7 @@ class MeshBridge:
             rx_rssi = _to_float(packet.get("rxRssi"))
             rx_snr = _to_float(packet.get("rxSnr"))
 
-            self._add_message(
+            msg = self._add_message(
                 text=text,
                 from_id=from_id,
                 from_name=from_name,
@@ -381,12 +390,82 @@ class MeshBridge:
                 rx_rssi=rx_rssi,
                 rx_snr=rx_snr,
             )
+            # Trigger command handler in a background thread — it might want
+            # to send a reply, which we can't do from inside the pubsub callback.
+            if (
+                self._command_handler
+                and msg.get("incoming")
+                and not msg.get("is_reaction")
+                and (text.startswith("!") or text.startswith("/"))
+            ):
+                threading.Thread(
+                    target=self._dispatch_command,
+                    args=(dict(msg),),
+                    daemon=True,
+                ).start()
         except Exception:
             log.exception("Failed to handle incoming text packet")
 
+    def _dispatch_command(self, msg: dict[str, Any]) -> None:
+        """Run the command handler and send its response back into the mesh."""
+        try:
+            response = self._command_handler(msg) if self._command_handler else None
+        except Exception:
+            log.exception("Command handler crashed")
+            return
+        if not response:
+            return
+        # Reply on the same channel; reference the original packet via reply_id
+        # so receivers see it as a threaded answer.
+        try:
+            if msg.get("msg_id"):
+                self.send_reply(
+                    response,
+                    reply_to=int(msg["msg_id"]),
+                    channel_index=int(msg.get("channel", 0)),
+                )
+            else:
+                self.send_text_chunked(
+                    response, channel_index=int(msg.get("channel", 0))
+                )
+        except Exception:
+            log.exception("Sending command response failed")
+
+    def get_known_nodes(self) -> list[dict[str, Any]]:
+        """Return a list of nodes the bot has heard from. Used for DM selector
+        and the node-map feature.
+        """
+        out: list[dict[str, Any]] = []
+        with self._lock:
+            if self._iface is None:
+                return out
+            try:
+                nodes = getattr(self._iface, "nodes", None) or {}
+                for k, n in nodes.items():
+                    if not isinstance(n, dict):
+                        continue
+                    user = n.get("user") or {}
+                    position = n.get("position") or {}
+                    out.append({
+                        "node_id": user.get("id") or str(k),
+                        "num": n.get("num"),
+                        "short_name": user.get("shortName") or "",
+                        "long_name": user.get("longName") or "",
+                        "last_heard": int(n.get("lastHeard") or 0) or None,
+                        "snr": n.get("snr"),
+                        "latitude": position.get("latitude"),
+                        "longitude": position.get("longitude"),
+                        "altitude": position.get("altitude"),
+                    })
+            except Exception:
+                log.exception("Failed to enumerate nodes")
+        out.sort(key=lambda r: (r.get("last_heard") or 0), reverse=True)
+        return out
+
     def get_messages(self, since_id: int = 0) -> list[dict[str, Any]]:
-        with self._msg_lock:
-            return [m for m in self._messages if m["id"] > since_id]
+        if self._db is None:
+            return []
+        return self._db.get_since(int(since_id or 0))
 
     def send_text(
         self,

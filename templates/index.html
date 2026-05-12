@@ -13,13 +13,89 @@
   </header>
 
   <nav class="tabs">
-    <button class="tab-btn active" data-tab="settings">⚙️ Настройки</button>
+    <button class="tab-btn active" data-tab="home">📊 Главная</button>
+    <button class="tab-btn" data-tab="settings">⚙️ Настройки</button>
     <button class="tab-btn" data-tab="chat">💬 Чат <span class="badge" id="chatBadge" hidden>0</span></button>
   </nav>
 
   <main>
+    <!-- =================== HOME TAB =================== -->
+    <div class="tab-panel active" data-tab="home">
+      <section class="card">
+        <h2>📡 Состояние</h2>
+        <div class="stats-grid">
+          <div class="stat">
+            <div class="stat-label">Связь с Heltec</div>
+            <div class="stat-value" id="statConn">…</div>
+            <div class="stat-sub" id="statConnSub"></div>
+          </div>
+          <div class="stat">
+            <div class="stat-label">Слышимых узлов</div>
+            <div class="stat-value" id="statNodes">—</div>
+            <div class="stat-sub">в таблице ноды</div>
+          </div>
+          <div class="stat">
+            <div class="stat-label">Уникальных отправителей</div>
+            <div class="stat-value" id="statSenders">—</div>
+            <div class="stat-sub">за 24 часа</div>
+          </div>
+          <div class="stat">
+            <div class="stat-label">Всего сообщений</div>
+            <div class="stat-value" id="statTotal">—</div>
+            <div class="stat-sub">в базе бота</div>
+          </div>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>📈 За последние сутки</h2>
+        <div class="stats-grid">
+          <div class="stat">
+            <div class="stat-label">Отправлено</div>
+            <div class="stat-value good" id="statSent">—</div>
+            <div class="stat-sub">сводок и сообщений</div>
+          </div>
+          <div class="stat">
+            <div class="stat-label">Получено</div>
+            <div class="stat-value" id="statRecv">—</div>
+            <div class="stat-sub">из mesh-сети</div>
+          </div>
+          <div class="stat">
+            <div class="stat-label">Средний RSSI</div>
+            <div class="stat-value" id="statRssi">—</div>
+            <div class="stat-sub">сила сигнала входящих</div>
+          </div>
+          <div class="stat">
+            <div class="stat-label">Средние прыжки</div>
+            <div class="stat-value" id="statHops">—</div>
+            <div class="stat-sub">сколько hops в среднем</div>
+          </div>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>🕒 Последняя активность</h2>
+        <div class="activity-row">
+          <span class="activity-label">↑ Бот отправил:</span>
+          <span class="activity-value" id="statLastOut">—</span>
+        </div>
+        <div class="activity-row">
+          <span class="activity-label">↓ Бот получил:</span>
+          <span class="activity-value" id="statLastIn">—</span>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>🛰 Узлы mesh-сети</h2>
+        <p class="hint">Последние известные ноды, в порядке свежести. Тыкни узел — откроется его профиль (скоро).</p>
+        <div id="nodesList" class="nodes-list">
+          <div class="muted">Загрузка…</div>
+        </div>
+      </section>
+    </div>
+
     <!-- =================== SETTINGS TAB =================== -->
-    <div class="tab-panel active" data-tab="settings">
+    <div class="tab-panel" data-tab="settings">
 
       <!-- Location -->
       <section class="card">
@@ -44,6 +120,10 @@
         <label class="toggle-row">
           <input type="checkbox" id="includeHeader">
           <span>Добавлять заголовок «Погода — Город»</span>
+        </label>
+        <label class="toggle-row">
+          <input type="checkbox" id="commandsEnabled">
+          <span>Отвечать на команды в чате (!погода, !ping, !nodes, !help)</span>
         </label>
       </section>
 
@@ -165,10 +245,13 @@
           <button class="reply-to-cancel ghost" title="Отменить ответ">✕</button>
         </div>
         <div class="row chat-compose">
+          <select id="chatDestination" class="chat-dest" title="Адресат">
+            <option value="broadcast">📢 Broadcast</option>
+          </select>
           <input type="text" id="chatInput" placeholder="Написать в mesh…">
           <button id="chatSend" class="primary">Отправить</button>
         </div>
-        <div class="muted chat-hint">Сообщение уйдёт broadcast'ом на канал, выбранный в настройках Heltec.</div>
+        <div class="muted chat-hint">Broadcast — всем в канале. Выбери узел из списка — личное сообщение.</div>
       </section>
     </div>
   </main>
@@ -196,7 +279,15 @@
           <option value="Asia/Almaty">Asia/Almaty</option>
           <option value="UTC">UTC</option>
         </select>
+        <button class="run-now ghost" title="Запустить сейчас (для теста)">▶</button>
         <button class="delete ghost" title="Удалить">✕</button>
+      </div>
+      <div class="slot-dest-row">
+        <label>Адресат
+          <select class="dest">
+            <option value="broadcast">📢 Broadcast</option>
+          </select>
+        </label>
       </div>
       <div class="dow"></div>
       <div class="fields"></div>
