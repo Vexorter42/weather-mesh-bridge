@@ -30,6 +30,30 @@ def command(*aliases: str, help_text: str = ""):
     return decorator
 
 
+# Map Latin letters that visually look like Cyrillic to their Cyrillic equivalents.
+# Helps people who accidentally typed "!cегодня" with a Latin "c" — common when
+# switching keyboards on phones.
+_LATIN_TO_CYRILLIC = str.maketrans({
+    "a": "а", "b": "в", "c": "с", "e": "е", "h": "н", "k": "к",
+    "m": "м", "o": "о", "p": "р", "t": "т", "x": "х", "y": "у",
+    "A": "А", "B": "В", "C": "С", "E": "Е", "H": "Н", "K": "К",
+    "M": "М", "O": "О", "P": "Р", "T": "Т", "X": "Х", "Y": "У",
+})
+
+
+def _normalize_cmd(cmd: str) -> str:
+    """Try to recover from common keyboard-layout typos.
+
+    If the token contains any Cyrillic char, replace Latin lookalikes with their
+    Cyrillic counterparts. If it's pure Latin, leave it alone (English commands
+    like 'ping', 'help' keep working).
+    """
+    has_cyrillic = any("Ѐ" <= c <= "ӿ" for c in cmd)
+    if has_cyrillic:
+        return cmd.translate(_LATIN_TO_CYRILLIC)
+    return cmd
+
+
 def _parse(text: str) -> tuple[str, list[str]]:
     text = text.strip().lstrip("!/").strip()
     if not text:
@@ -52,30 +76,43 @@ def handle(msg: dict[str, Any], *, bridge: Any, cfg: dict[str, Any]) -> Optional
         return None
     handler = _REGISTRY.get(cmd)
     if not handler:
-        return f"Неизвестная команда «!{cmd}». Попробуй !help"
+        # Try once more after substituting Latin lookalikes — helps when a phone
+        # keyboard slipped to Latin and typed e.g. "!cегодня" (Latin "c").
+        fixed = _normalize_cmd(cmd)
+        if fixed != cmd:
+            handler = _REGISTRY.get(fixed)
+            if handler:
+                log.info("Command typo corrected: %r -> %r", cmd, fixed)
+                cmd = fixed
+    if not handler:
+        log.warning(
+            "Unknown command: %r (codepoints %s)",
+            cmd, [hex(ord(c)) for c in cmd],
+        )
+        return f"Неизвестная команда «/{cmd}». Попробуй /help"
     try:
         return handler(args=args, msg=msg, bridge=bridge, cfg=cfg)
     except Exception as exc:
-        log.exception("Command !%s crashed", cmd)
-        return f"Ошибка при выполнении !{cmd}: {exc}"
+        log.exception("Command /%s crashed", cmd)
+        return f"Ошибка при выполнении /{cmd}: {exc}"
 
 
 # ---------------------------------------------------------------------------
 # Commands
 # ---------------------------------------------------------------------------
 
-@command("help", "помощь", "?", "h", help_text="!help — список команд")
+@command("help", "помощь", "?", "h", help_text="/help — список команд")
 def cmd_help(args, msg, bridge, cfg):
     lines = ["Команды бота:"] + _HELP_LINES
     return "\n".join(lines)
 
 
-@command("ping", help_text="!ping — проверка связи (отвечает pong)")
+@command("ping", help_text="/ping — проверка связи (отвечает pong)")
 def cmd_ping(args, msg, bridge, cfg):
     return f"pong · {datetime.now().strftime('%H:%M:%S')}"
 
 
-@command("время", "time", help_text="!время — текущее время на боте")
+@command("время", "time", help_text="/время — текущее время на боте")
 def cmd_time(args, msg, bridge, cfg):
     return f"Время на боте: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}"
 
@@ -95,13 +132,13 @@ def _resolve_location(args, cfg):
 
     loc = cfg.get("location") or {}
     if loc.get("latitude") is None:
-        raise RuntimeError("Город не настроен. Укажи город в команде: !погода Москва")
+        raise RuntimeError("Город не настроен. Укажи город в команде: /погода Москва")
     return loc["latitude"], loc["longitude"], loc.get("name", ""), loc.get("timezone") or "auto"
 
 
 @command(
     "погода", "weather", "w",
-    help_text="!погода [город] — текущая погода",
+    help_text="/погода [город] — текущая погода",
 )
 def cmd_weather(args, msg, bridge, cfg):
     lat, lon, name, tz = _resolve_location(args, cfg)
@@ -118,7 +155,7 @@ def cmd_weather(args, msg, bridge, cfg):
 
 @command(
     "завтра", "tomorrow",
-    help_text="!завтра [город] — прогноз на завтра",
+    help_text="/завтра [город] — прогноз на завтра",
 )
 def cmd_tomorrow(args, msg, bridge, cfg):
     lat, lon, name, tz = _resolve_location(args, cfg)
@@ -135,7 +172,7 @@ def cmd_tomorrow(args, msg, bridge, cfg):
 
 @command(
     "сегодня", "today",
-    help_text="!сегодня [город] — прогноз на сегодня (мин/макс/осадки)",
+    help_text="/сегодня [город] — прогноз на сегодня (мин/макс/осадки)",
 )
 def cmd_today(args, msg, bridge, cfg):
     lat, lon, name, tz = _resolve_location(args, cfg)
@@ -150,7 +187,7 @@ def cmd_today(args, msg, bridge, cfg):
     )
 
 
-@command("nodes", "узлы", help_text="!nodes — список слышимых узлов mesh-сети")
+@command("nodes", "узлы", help_text="/nodes — список слышимых узлов mesh-сети")
 def cmd_nodes(args, msg, bridge, cfg):
     status = bridge.status() if bridge else {}
     if not status.get("connected"):

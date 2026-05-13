@@ -22,6 +22,7 @@ from flask import Flask, jsonify, render_template, request
 
 import commands
 import weather
+import weather_alerts
 from chat_db import ChatDb
 from meshbridge import MeshBridge
 
@@ -91,6 +92,7 @@ def load_config() -> dict[str, Any]:
             },
             "message": {"language": "ru", "include_header": True, "use_emojis": False},
             "commands": {"enabled": True},
+            "alerts": dict(weather_alerts.DEFAULTS),
             "schedules": [],
         }
     with CONFIG_PATH.open("r", encoding="utf-8") as f:
@@ -137,6 +139,10 @@ def _handle_mesh_command(msg: dict[str, Any]) -> Optional[str]:
 
 
 BRIDGE.set_command_handler(_handle_mesh_command)
+
+# Persistent state for weather-alerts dedup, plus background worker.
+ALERTS_STATE = weather_alerts.AlertsState(BASE_DIR / "alerts_state.json")
+weather_alerts.start_background_worker(load_config, BRIDGE, ALERTS_STATE)
 
 scheduler = BackgroundScheduler(timezone="UTC")  # cron triggers carry their own tz
 scheduler.start()
@@ -368,6 +374,8 @@ def api_set_config():
             cfg["message"] = {**cfg.get("message", {}), **payload["message"]}
         if "commands" in payload:
             cfg["commands"] = {**cfg.get("commands", {}), **payload["commands"]}
+        if "alerts" in payload:
+            cfg["alerts"] = {**weather_alerts.DEFAULTS, **(cfg.get("alerts") or {}), **payload["alerts"]}
         save_config(cfg)
     BRIDGE.configure(cfg.get("mesh", {}) or {})
     reschedule_all()
@@ -614,6 +622,24 @@ def api_jobs():
             }
         )
     return jsonify(out)
+
+
+@app.route("/api/alerts/status", methods=["GET"])
+def api_alerts_status():
+    """Returns last-check time + recent triggered alerts."""
+    return jsonify(ALERTS_STATE.status())
+
+
+@app.route("/api/alerts/check", methods=["POST"])
+def api_alerts_check():
+    """Force one alerts-check cycle right now — for manual testing."""
+    cfg = load_config()
+    try:
+        sent = weather_alerts.check(cfg, BRIDGE, ALERTS_STATE)
+    except Exception as exc:
+        log.exception("Manual alerts check failed")
+        return jsonify({"error": str(exc)}), 500
+    return jsonify({"sent": sent, "count": len(sent)})
 
 
 @app.route("/api/stats", methods=["GET"])

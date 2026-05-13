@@ -388,6 +388,55 @@ button.run-now:disabled { opacity: 0.5; cursor: wait; }
 .nodes-list .node-age { color: var(--muted); font-size: 0.78rem; font-variant-numeric: tabular-nums; }
 .nodes-list .node-snr { font-size: 0.78rem; padding: 1px 7px; border: 1px solid var(--border); border-radius: 999px; }
 
+.map-container {
+  height: 60vh;
+  min-height: 360px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  margin-top: 10px;
+  overflow: hidden;
+  background: var(--card-2);
+}
+.map-foot {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+  font-size: 0.85rem;
+}
+/* Leaflet popup tweaks for our dark theme */
+.leaflet-popup-content-wrapper {
+  background: var(--card);
+  color: var(--text);
+  border: 1px solid var(--border);
+}
+.leaflet-popup-tip { background: var(--card); }
+.leaflet-popup-content { font-size: 0.9rem; }
+.leaflet-popup-content strong { color: var(--accent); }
+.leaflet-control-attribution { font-size: 0.7rem; opacity: 0.7; }
+.leaflet-bar a { background: var(--card) !important; color: var(--text) !important; border-color: var(--border) !important; }
+.leaflet-bar a:hover { background: var(--card-2) !important; }
+
+.alerts-status { margin-top: 10px; font-size: 0.82rem; }
+.alerts-history {
+  margin-top: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 200px;
+  overflow-y: auto;
+}
+.alerts-history .alert-item {
+  background: var(--card-2);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 0.82rem;
+}
+.alerts-history .alert-time { color: var(--muted); font-size: 0.72rem; margin-bottom: 2px; }
+
 .chat-dest { max-width: 200px; }
 .slot-dest-row { margin-top: 10px; }
 .slot-dest-row label { font-size: 0.82rem; color: var(--muted); }

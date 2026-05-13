@@ -259,6 +259,19 @@ class MeshBridge:
                     nodes = getattr(self._iface, "nodes", None) or {}
                     info["my_node_num"] = getattr(my_info, "my_node_num", None)
                     info["nodes_known"] = len(nodes)
+                    # «Онлайн» — те, чей last_heard был не дальше часа назад.
+                    now = int(time.time())
+                    online = 0
+                    for n in nodes.values():
+                        if not isinstance(n, dict):
+                            continue
+                        try:
+                            lh = int(n.get("lastHeard") or 0)
+                        except (TypeError, ValueError):
+                            lh = 0
+                        if lh and (now - lh) < 3600:
+                            online += 1
+                    info["nodes_online_1h"] = online
                 except Exception as exc:
                     info["info_error"] = str(exc)
             return info

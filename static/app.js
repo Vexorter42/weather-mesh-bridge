@@ -93,6 +93,8 @@ $$(".tab-btn").forEach(btn => {
       requestAnimationFrame(() => { log.scrollTop = log.scrollHeight; });
     } else if (CURRENT_TAB === "home") {
       refreshDashboard();
+    } else if (CURRENT_TAB === "map") {
+      refreshMap();
     }
   });
 });
@@ -181,6 +183,144 @@ function populateDestinationSelectors(nodes) {
   });
 }
 
+// ---------- Map (Leaflet) ----------
+let MAP = null;
+let MAP_MARKER_LAYER = null;
+let MAP_RETRIES = 0;
+
+function ensureMap() {
+  if (MAP) return MAP;
+  if (typeof L === "undefined") return null;
+  const el = document.getElementById("map");
+  if (!el) return null;
+  MAP = L.map(el).setView([55.75, 37.62], 4);
+  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    maxZoom: 19,
+    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+  }).addTo(MAP);
+  MAP_MARKER_LAYER = L.layerGroup().addTo(MAP);
+  return MAP;
+}
+
+async function refreshMap() {
+  const map = ensureMap();
+  const info = document.getElementById("mapInfo");
+  if (!map) {
+    if (MAP_RETRIES < 8) {
+      // Leaflet is loaded with `defer` — on first paint it might not yet be ready.
+      MAP_RETRIES += 1;
+      if (info) info.textContent = `Загружаю карту… (попытка ${MAP_RETRIES})`;
+      setTimeout(refreshMap, 600);
+      return;
+    }
+    if (info) {
+      info.textContent = "Leaflet не загрузился. Проверь, что у браузера есть интернет, "
+        + "и попробуй открыть https://unpkg.com/leaflet@1.9.4/dist/leaflet.js в новой вкладке — должен открыться JS-файл.";
+    }
+    return;
+  }
+  MAP_RETRIES = 0;
+  // Leaflet sometimes draws a blank canvas when initialized inside a hidden tab.
+  // Force a redraw now that the panel is visible.
+  setTimeout(() => map.invalidateSize(), 50);
+  try {
+    const nodes = await api("/api/nodes");
+    KNOWN_NODES = Array.isArray(nodes) ? nodes : [];
+    populateDestinationSelectors(KNOWN_NODES);
+    MAP_MARKER_LAYER.clearLayers();
+    const withPos = KNOWN_NODES.filter(n => Number.isFinite(n.latitude) && Number.isFinite(n.longitude));
+    if (!withPos.length) {
+      if (info) info.textContent = `Узлов с координатами: 0 (всего узлов: ${KNOWN_NODES.length})`;
+      return;
+    }
+    const bounds = [];
+    for (const n of withPos) {
+      const lat = Number(n.latitude), lon = Number(n.longitude);
+      bounds.push([lat, lon]);
+      const long = n.long_name || n.node_id || "?";
+      const short = n.short_name ? ` [${n.short_name}]` : "";
+      const age = n.last_heard ? relTime(n.last_heard) : "—";
+      const snr = n.snr != null ? `<br>SNR: ${Number(n.snr).toFixed(1)}` : "";
+      const alt = Number.isFinite(n.altitude) ? `<br>Высота: ${Math.round(n.altitude)} м` : "";
+      const popup = `<strong>${escapeHtml(long)}</strong>${escapeHtml(short)}<br>` +
+                    `<span class="muted">${lat.toFixed(4)}, ${lon.toFixed(4)}</span><br>` +
+                    `Слышали: ${age}${snr}${alt}`;
+      L.marker([lat, lon]).addTo(MAP_MARKER_LAYER).bindPopup(popup);
+    }
+    if (bounds.length === 1) {
+      map.setView(bounds[0], 12);
+    } else {
+      map.fitBounds(bounds, { padding: [30, 30], maxZoom: 13 });
+    }
+    if (info) info.textContent = `Узлов с координатами: ${withPos.length} из ${KNOWN_NODES.length}`;
+  } catch (e) {
+    if (info) info.textContent = "Не удалось загрузить узлы: " + e.message;
+  }
+}
+
+document.getElementById("mapRefresh")?.addEventListener("click", refreshMap);
+
+// ---------- Weather alerts ----------
+async function refreshAlertsUi() {
+  try {
+    const [cfg, status] = await Promise.all([
+      api("/api/config"),
+      api("/api/alerts/status").catch(() => ({})),
+    ]);
+    const a = cfg.alerts || {};
+    $("#alertsEnabled").checked = !!a.enabled;
+    $("#alertsThunderstorm").checked = a.thunderstorm_alerts !== false;
+    $("#alertsWind").value = a.wind_threshold_ms ?? 15;
+    $("#alertsRain").value = a.rain_prob_threshold ?? 80;
+    $("#alertsFrost").value = a.frost_threshold_c ?? -5;
+    $("#alertsInterval").value = a.check_interval_minutes ?? 15;
+
+    const last = status.last_check_ts;
+    $("#alertsStatus").textContent = last
+      ? `Последняя проверка: ${relTime(last)}.`
+      : "Проверок ещё не было.";
+
+    const hist = $("#alertsHistory");
+    hist.innerHTML = "";
+    const items = (status.history || []).slice().reverse().slice(0, 5);
+    for (const h of items) {
+      const div = document.createElement("div");
+      div.className = "alert-item";
+      div.innerHTML = `<div class="alert-time">${new Date(h.ts * 1000).toLocaleString()}</div>` +
+                      escapeHtml(h.text || "");
+      hist.appendChild(div);
+    }
+  } catch (e) { /* silent */ }
+}
+
+$("#alertsSave")?.addEventListener("click", async () => {
+  const payload = {
+    enabled: $("#alertsEnabled").checked,
+    thunderstorm_alerts: $("#alertsThunderstorm").checked,
+    wind_threshold_ms: parseFloat($("#alertsWind").value) || 15,
+    rain_prob_threshold: parseInt($("#alertsRain").value, 10) || 80,
+    frost_threshold_c: parseFloat($("#alertsFrost").value),
+    check_interval_minutes: parseInt($("#alertsInterval").value, 10) || 15,
+  };
+  try {
+    await api("/api/config", { method: "POST", body: { alerts: payload } });
+    toast("Настройки предупреждений сохранены", "ok");
+    refreshAlertsUi();
+  } catch (e) { toast(e.message, "err"); }
+});
+
+$("#alertsCheckNow")?.addEventListener("click", async () => {
+  try {
+    const r = await api("/api/alerts/check", { method: "POST" });
+    if (r.count > 0) {
+      toast(`Отправлено предупреждений: ${r.count}`, "ok");
+    } else {
+      toast("Условий для предупреждений сейчас нет", "ok");
+    }
+    refreshAlertsUi();
+  } catch (e) { toast(e.message, "err"); }
+});
+
 // ---------- Mesh status ----------
 async function refreshMeshStatus() {
   const el = $("#meshStatus");
@@ -191,7 +331,8 @@ async function refreshMeshStatus() {
       : (s.resolved_path || "не найден");
     if (s.connected) {
       el.className = "status ok";
-      el.textContent = `📡 ${where} · узлов: ${s.nodes_known ?? 0}`;
+      const online = s.nodes_online_1h ?? 0;
+      el.textContent = `📡 ${where} · узлов: ${s.nodes_known ?? 0} · онлайн: ${online}`;
     } else {
       el.className = "status";
       el.textContent = `📡 ${where} · отключён`;
@@ -860,6 +1001,7 @@ async function init() {
   await refreshSlots();
   refreshMeshStatus();
   refreshNotifUi();
+  refreshAlertsUi();
   pollChat();
   refreshDashboard();
   setInterval(refreshMeshStatus, 15000);

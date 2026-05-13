@@ -5,6 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Weather → Heltec Mesh Bridge</title>
   <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="anonymous" />
+  <script defer src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin="anonymous"></script>
 </head>
 <body>
   <header class="topbar">
@@ -14,6 +16,7 @@
 
   <nav class="tabs">
     <button class="tab-btn active" data-tab="home">📊 Главная</button>
+    <button class="tab-btn" data-tab="map">🗺 Карта</button>
     <button class="tab-btn" data-tab="settings">⚙️ Настройки</button>
     <button class="tab-btn" data-tab="chat">💬 Чат <span class="badge" id="chatBadge" hidden>0</span></button>
   </nav>
@@ -94,6 +97,22 @@
       </section>
     </div>
 
+    <!-- =================== MAP TAB =================== -->
+    <div class="tab-panel" data-tab="map">
+      <section class="card">
+        <h2>🗺 Карта узлов</h2>
+        <p class="hint">
+          Показываю узлы mesh-сети, у которых есть позиция. Они приходят, когда нода присылает <code>POSITION_APP</code>.
+          В Meshtastic-приложении выставь Position → Smart broadcast, чтобы соседи делились координатами.
+        </p>
+        <div id="map" class="map-container"></div>
+        <div class="muted map-foot">
+          <span id="mapInfo">…</span>
+          <button id="mapRefresh" class="ghost">Обновить</button>
+        </div>
+      </section>
+    </div>
+
     <!-- =================== SETTINGS TAB =================== -->
     <div class="tab-panel" data-tab="settings">
 
@@ -123,7 +142,7 @@
         </label>
         <label class="toggle-row">
           <input type="checkbox" id="commandsEnabled">
-          <span>Отвечать на команды в чате (!погода, !ping, !nodes, !help)</span>
+          <span>Отвечать на команды в чате (/погода, /ping, /nodes, /help). `!` тоже работает.</span>
         </label>
       </section>
 
@@ -167,6 +186,44 @@
           <button id="saveMesh">Сохранить</button>
           <button id="testConnect" class="ghost">Проверить связь</button>
         </div>
+      </section>
+
+      <!-- Weather alerts -->
+      <section class="card">
+        <h2>⚠️ Предупреждения о погоде</h2>
+        <p class="hint">
+          Раз в N минут бот проверяет прогноз. При выполнении любого условия — шлёт алерт в mesh
+          (один раз в сутки на тип). Безопасный спам-фильтр: даже если условия держатся весь день,
+          каждое предупреждение придёт максимум один раз за календарные сутки.
+        </p>
+        <label class="toggle-row">
+          <input type="checkbox" id="alertsEnabled">
+          <span>Включить предупреждения</span>
+        </label>
+        <label class="toggle-row">
+          <input type="checkbox" id="alertsThunderstorm">
+          <span>Гроза (по текущей погоде)</span>
+        </label>
+        <div class="grid2">
+          <label>Сильный ветер от, м/с
+            <input type="number" id="alertsWind" min="5" max="40" step="1">
+          </label>
+          <label>Вероятность осадков от, %
+            <input type="number" id="alertsRain" min="50" max="100" step="5">
+          </label>
+          <label>Заморозки до, °C
+            <input type="number" id="alertsFrost" min="-30" max="5" step="1">
+          </label>
+          <label>Интервал проверки, мин
+            <input type="number" id="alertsInterval" min="2" max="120" step="1">
+          </label>
+        </div>
+        <div class="row">
+          <button id="alertsSave">Сохранить</button>
+          <button id="alertsCheckNow" class="ghost">Проверить сейчас</button>
+        </div>
+        <div class="muted alerts-status" id="alertsStatus"></div>
+        <div id="alertsHistory" class="alerts-history"></div>
       </section>
 
       <!-- Schedules -->
