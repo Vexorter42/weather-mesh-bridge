@@ -601,9 +601,143 @@ $("#sendBtn").addEventListener("click", async () => {
   } catch (e) { toast(e.message, "err"); }
 });
 
-// ---------- Chat ----------
+// ---------- Chat: state ----------
 let LAST_MSG_ID = 0;
 let UNREAD = 0;
+let ALL_MESSAGES = [];      // full log, kept in memory for filtering
+let SELECTED_CONV = null;   // currently displayed conversation key
+let CONVS = new Map();      // convKey -> {key, title, kind, channel, peerId, lastMsg, unread, icon}
+
+const BROADCAST_TO = new Set(["^all", "all", "", null, undefined]);
+
+function isBroadcast(m) { return BROADCAST_TO.has(m.to_id); }
+
+function conversationKey(m) {
+  // Broadcasts live in a per-channel bucket. DMs are keyed by the *other* party.
+  if (isBroadcast(m)) return `ch:${m.channel ?? 0}`;
+  const other = m.incoming ? m.from_id : m.to_id;
+  return `dm:${other}`;
+}
+
+function lookupNodeName(nodeId) {
+  if (!nodeId) return String(nodeId || "?");
+  const n = KNOWN_NODES.find(x => x.node_id === nodeId || String(x.num) === String(nodeId));
+  if (n) return n.long_name || n.short_name || nodeId;
+  return String(nodeId);
+}
+
+function conversationLabel(key) {
+  if (key.startsWith("ch:")) return `📢 Канал ${key.slice(3)}`;
+  if (key.startsWith("dm:")) {
+    const id = key.slice(3);
+    return `👤 ${lookupNodeName(id)}`;
+  }
+  return key;
+}
+
+function rebuildConversations() {
+  const map = new Map();
+  for (const m of ALL_MESSAGES) {
+    const key = conversationKey(m);
+    let conv = map.get(key);
+    if (!conv) {
+      conv = {
+        key,
+        kind: key.startsWith("ch:") ? "channel" : "dm",
+        channel: key.startsWith("ch:") ? parseInt(key.slice(3), 10) : null,
+        peerId: key.startsWith("dm:") ? key.slice(3) : null,
+        lastMsg: m,
+        unread: 0,
+      };
+      map.set(key, conv);
+    }
+    if (m.id > (conv.lastMsg?.id || 0)) conv.lastMsg = m;
+  }
+  // Carry over unread counters from the previous CONVS
+  for (const [key, conv] of map) {
+    const prev = CONVS.get(key);
+    if (prev) conv.unread = prev.unread || 0;
+  }
+  CONVS = map;
+}
+
+function renderConvList() {
+  const wrap = $("#convList");
+  wrap.innerHTML = "";
+  const convs = [...CONVS.values()].sort((a, b) => {
+    return (b.lastMsg?.id || 0) - (a.lastMsg?.id || 0);
+  });
+  if (!convs.length) {
+    wrap.innerHTML = "<div class='muted' style='padding: 12px;'>Чатов пока нет.</div>";
+    return;
+  }
+  for (const conv of convs) {
+    const div = document.createElement("div");
+    div.className = "conv-item";
+    if (conv.key === SELECTED_CONV) div.classList.add("active");
+    const icon = conv.kind === "channel" ? "📢" : "👤";
+    const title = conv.kind === "channel"
+      ? `Канал ${conv.channel}`
+      : lookupNodeName(conv.peerId);
+    const preview = conv.lastMsg
+      ? (conv.lastMsg.from_name && !conv.lastMsg.incoming ? "Я: " : "")
+        + (conv.lastMsg.text || "").slice(0, 60)
+      : "";
+    const time = conv.lastMsg
+      ? new Date(conv.lastMsg.time * 1000).toLocaleTimeString().slice(0, 5)
+      : "";
+    const unreadHtml = conv.unread > 0
+      ? `<div class="conv-unread">${conv.unread}</div>`
+      : "";
+    div.innerHTML =
+      `<div class="conv-icon">${icon}</div>` +
+      `<div class="conv-body">` +
+        `<div class="conv-name">${escapeHtml(title)}</div>` +
+        `<div class="conv-preview">${escapeHtml(preview)}</div>` +
+      `</div>` +
+      `<div class="conv-meta"><span>${time}</span>${unreadHtml}</div>`;
+    div.addEventListener("click", () => selectConversation(conv.key));
+    wrap.appendChild(div);
+  }
+}
+
+function selectConversation(key) {
+  SELECTED_CONV = key;
+  const conv = CONVS.get(key);
+  if (conv) {
+    conv.unread = 0;
+  }
+  $("#chatLayout").classList.add("show-main");
+  $("#chatTitle").textContent = conversationLabel(key);
+  $("#chatInput").disabled = false;
+  $("#chatSend").disabled = false;
+  $("#chatInput").placeholder = conv?.kind === "dm"
+    ? `Написать ${lookupNodeName(conv.peerId)}…`
+    : "Написать в канал…";
+  PENDING_REACTIONS.clear();
+  renderConvList();
+  renderChatLog();
+}
+
+function renderChatLog() {
+  const log = $("#chatLog");
+  log.innerHTML = "";
+  if (!SELECTED_CONV) {
+    log.innerHTML = "<div class='chat-empty muted'>Выберите канал или собеседника в списке слева.</div>";
+    return;
+  }
+  const messages = ALL_MESSAGES.filter(m => conversationKey(m) === SELECTED_CONV);
+  if (!messages.length) {
+    log.innerHTML = "<div class='chat-empty muted'>В этом чате ещё нет сообщений.</div>";
+    return;
+  }
+  for (const m of messages) appendChatMessage(m);
+  log.scrollTop = log.scrollHeight;
+}
+
+document.getElementById("chatBack")?.addEventListener("click", () => {
+  $("#chatLayout").classList.remove("show-main");
+});
 
 // Map of mesh msg_id -> reactions {emoji: {count, names: Set}}, used when a
 // reaction arrives BEFORE its parent message has been rendered (rare but possible
@@ -720,18 +854,38 @@ async function pollChat() {
     const data = await api(`/api/chat/messages?since=${LAST_MSG_ID}`);
     if (!data.messages?.length) return;
     const firstPoll = LAST_MSG_ID === 0;
+    let shouldRerender = false;
     for (const m of data.messages) {
-      appendChatMessage(m);
+      ALL_MESSAGES.push(m);
       if (m.id > LAST_MSG_ID) LAST_MSG_ID = m.id;
-      // Reactions don't bump the unread badge — they update an existing message.
+      const convKey = conversationKey(m);
+      // If the message belongs to the currently-open conversation, append to DOM
+      if (convKey === SELECTED_CONV) {
+        appendChatMessage(m);
+      } else if (m.incoming && !m.is_reaction) {
+        // For other conversations, bump per-conv unread counter
+        const conv = CONVS.get(convKey);
+        if (conv) conv.unread = (conv.unread || 0) + 1;
+      }
+      // Tab-level unread counter
       if (m.incoming && !m.is_reaction && CURRENT_TAB !== "chat") {
         UNREAD += 1;
       }
-      // Browser notification for new incoming text messages only.
-      // Skip notifying for the initial backlog when page just loaded.
+      // Browser notification for new incoming text messages
       if (!firstPoll && m.incoming && !m.is_reaction) {
         notifyIncoming(m);
       }
+      if (!firstPoll || ALL_MESSAGES.length === data.messages.length) {
+        shouldRerender = true;
+      }
+    }
+    if (shouldRerender) {
+      rebuildConversations();
+      renderConvList();
+    }
+    // Trim in-memory buffer to last 500 messages to keep things sprightly
+    if (ALL_MESSAGES.length > 500) {
+      ALL_MESSAGES = ALL_MESSAGES.slice(-500);
     }
     const badge = $("#chatBadge");
     if (UNREAD > 0 && CURRENT_TAB !== "chat") {
@@ -957,7 +1111,12 @@ $("#replyTo .reply-to-cancel").addEventListener("click", cancelReply);
 $("#chatSend").addEventListener("click", async () => {
   const text = $("#chatInput").value.trim();
   if (!text) return;
-  const destination = $("#chatDestination")?.value || "broadcast";
+  if (!SELECTED_CONV) {
+    toast("Выберите чат слева", "err");
+    return;
+  }
+  const conv = CONVS.get(SELECTED_CONV);
+  const destination = conv?.kind === "dm" ? conv.peerId : "broadcast";
   try {
     if (REPLY_TO) {
       await api("/api/chat/reply", {

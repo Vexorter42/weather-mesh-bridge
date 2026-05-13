@@ -57,6 +57,7 @@ class ChatDb:
                     time INTEGER NOT NULL,
                     from_id TEXT,
                     from_name TEXT,
+                    to_id TEXT,
                     channel INTEGER,
                     text TEXT,
                     incoming INTEGER NOT NULL,
@@ -72,6 +73,10 @@ class ChatDb:
             c.execute("CREATE INDEX IF NOT EXISTS idx_msg_time ON messages(time)")
             c.execute("CREATE INDEX IF NOT EXISTS idx_msg_mesh_id ON messages(msg_id)")
             c.execute("CREATE INDEX IF NOT EXISTS idx_msg_reply ON messages(reply_to)")
+            # Lightweight migration for older DBs that don't have to_id yet.
+            cols = {row[1] for row in c.execute("PRAGMA table_info(messages)")}
+            if "to_id" not in cols:
+                c.execute("ALTER TABLE messages ADD COLUMN to_id TEXT")
 
     # ------------------------------------------------------------------
     # CRUD
@@ -90,15 +95,16 @@ class ChatDb:
             c = self._connect()
             cursor = c.execute(
                 """
-                INSERT INTO messages (time, from_id, from_name, channel, text, incoming,
+                INSERT INTO messages (time, from_id, from_name, to_id, channel, text, incoming,
                                       msg_id, reply_to, is_reaction,
                                       hops_taken, rx_rssi, rx_snr)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     int(msg.get("time") or time.time()),
                     str(msg.get("from_id") or ""),
                     msg.get("from_name") or "",
+                    msg.get("to_id"),
                     int(msg.get("channel") or 0),
                     msg.get("text") or "",
                     1 if msg.get("incoming") else 0,

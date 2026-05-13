@@ -307,6 +307,7 @@ class MeshBridge:
         from_name: str,
         channel: int,
         incoming: bool,
+        to_id: Optional[str] = None,
         msg_id: Any = None,
         reply_to: Any = None,
         is_reaction: bool = False,
@@ -318,6 +319,7 @@ class MeshBridge:
             "time": int(time.time()),
             "from_id": from_id,
             "from_name": from_name,
+            "to_id": to_id,
             "channel": int(channel or 0),
             "text": text,
             "incoming": incoming,
@@ -350,6 +352,7 @@ class MeshBridge:
             if not text:
                 return
             from_id = packet.get("fromId") or packet.get("from")
+            to_id = packet.get("toId")  # "^all" for broadcast, "!hex" for DM
             channel = packet.get("channel", 0)
             from_name = self._resolve_name(from_id)
 
@@ -394,6 +397,7 @@ class MeshBridge:
                 text=text,
                 from_id=from_id,
                 from_name=from_name,
+                to_id=to_id,
                 channel=channel,
                 incoming=True,
                 msg_id=msg_id,
@@ -420,7 +424,12 @@ class MeshBridge:
             log.exception("Failed to handle incoming text packet")
 
     def _dispatch_command(self, msg: dict[str, Any]) -> None:
-        """Run the command handler and send its response back into the mesh."""
+        """Run the command handler and send its response back into the mesh.
+
+        If the original request arrived as a direct message (to_id is a specific
+        node, not "^all"), the response goes back as a DM to the sender. Public
+        broadcasts get a threaded reply on the same channel.
+        """
         try:
             response = self._command_handler(msg) if self._command_handler else None
         except Exception:
@@ -428,19 +437,34 @@ class MeshBridge:
             return
         if not response:
             return
-        # Reply on the same channel; reference the original packet via reply_id
-        # so receivers see it as a threaded answer.
+
+        to_id = msg.get("to_id")
+        is_dm = bool(to_id) and to_id not in ("^all", "all")
+        channel_index = int(msg.get("channel", 0))
+
         try:
-            if msg.get("msg_id"):
+            if is_dm:
+                # Reply privately to the sender; no reply_id needed (it's already
+                # a one-on-one conversation thread).
+                from_id = msg.get("from_id")
+                if from_id:
+                    log.info("Command was DM from %s — replying privately", from_id)
+                    self.send_text_chunked(
+                        response,
+                        channel_index=channel_index,
+                        destination=str(from_id),
+                    )
+                else:
+                    # No sender id — fall back to broadcast.
+                    self.send_text_chunked(response, channel_index=channel_index)
+            elif msg.get("msg_id"):
                 self.send_reply(
                     response,
                     reply_to=int(msg["msg_id"]),
-                    channel_index=int(msg.get("channel", 0)),
+                    channel_index=channel_index,
                 )
             else:
-                self.send_text_chunked(
-                    response, channel_index=int(msg.get("channel", 0))
-                )
+                self.send_text_chunked(response, channel_index=channel_index)
         except Exception:
             log.exception("Sending command response failed")
 
@@ -512,8 +536,10 @@ class MeshBridge:
                 self._close_locked()
                 raise RuntimeError(f"Ошибка отправки в mesh: {exc}") from exc
         # log outgoing message into chat buffer (outside lock)
+        is_broadcast = (not destination) or destination == "broadcast"
         self._add_message(
             text=text, from_id="me", from_name="Я",
+            to_id="^all" if is_broadcast else str(destination),
             channel=int(channel_index), incoming=False,
             msg_id=pkt_id,
         )
@@ -568,10 +594,12 @@ class MeshBridge:
 
         # Mirror our own reaction into the chat buffer so the UI shows it
         # as a chip immediately, without waiting for the mesh to echo it back.
+        is_broadcast = (not destination) or destination == "broadcast"
         self._add_message(
             text=emoji_text,
             from_id="me",
             from_name="Я",
+            to_id="^all" if is_broadcast else str(destination),
             channel=int(channel_index),
             incoming=False,
             msg_id=pkt_id,
@@ -617,10 +645,12 @@ class MeshBridge:
                 self._close_locked()
                 raise RuntimeError(f"Ошибка отправки ответа: {exc}") from exc
 
+        is_broadcast = (not destination) or destination == "broadcast"
         self._add_message(
             text=text,
             from_id="me",
             from_name="Я",
+            to_id="^all" if is_broadcast else str(destination),
             channel=int(channel_index),
             incoming=False,
             msg_id=pkt_id,

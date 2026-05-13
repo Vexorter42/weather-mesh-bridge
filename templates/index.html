@@ -277,38 +277,44 @@
     <!-- =================== CHAT TAB =================== -->
     <div class="tab-panel" data-tab="chat">
       <section class="card chat-card">
-        <h2>💬 Чат mesh-сети</h2>
-        <p class="hint">
-          Здесь видны последние ~200 сообщений в каналах, которые слышит твоя нода.
-          Чтобы что-то получать — нода должна быть подключена (зелёная плашка вверху).
-        </p>
         <div class="notif-bar">
           <label class="toggle-row">
             <input type="checkbox" id="notifEnabled">
-            <span>Уведомлять о новых сообщениях</span>
+            <span>Уведомления</span>
           </label>
-          <button id="notifPermBtn" class="ghost" hidden>Запросить разрешение браузера</button>
+          <button id="notifPermBtn" class="ghost" hidden>Запросить разрешение</button>
           <span id="notifStatus" class="muted"></span>
         </div>
-        <div id="chatLog" class="chat-log">
-          <div class="chat-empty muted">Сообщений пока нет — подключись к ноде и попроси кого-нибудь написать.</div>
-        </div>
-        <div id="replyTo" class="reply-to-bar" hidden>
-          <div class="reply-to-content">
-            <span class="reply-to-label">↪ Ответ для</span>
-            <strong class="reply-to-name"></strong>
-            <span class="reply-to-preview muted"></span>
+
+        <div class="chat-layout" id="chatLayout">
+          <aside class="chat-sidebar">
+            <div class="sidebar-title">Чаты</div>
+            <div id="convList" class="conv-list">
+              <div class="muted" style="padding: 12px;">Загрузка…</div>
+            </div>
+          </aside>
+          <div class="chat-main">
+            <header class="chat-header">
+              <button class="chat-back ghost" id="chatBack" title="Назад к списку">←</button>
+              <span class="chat-title" id="chatTitle">Выберите чат слева</span>
+            </header>
+            <div id="chatLog" class="chat-log">
+              <div class="chat-empty muted">Выберите канал или собеседника в списке слева.</div>
+            </div>
+            <div id="replyTo" class="reply-to-bar" hidden>
+              <div class="reply-to-content">
+                <span class="reply-to-label">↪ Ответ для</span>
+                <strong class="reply-to-name"></strong>
+                <span class="reply-to-preview muted"></span>
+              </div>
+              <button class="reply-to-cancel ghost" title="Отменить ответ">✕</button>
+            </div>
+            <div class="row chat-compose">
+              <input type="text" id="chatInput" placeholder="Выбери чат и начни писать…" disabled>
+              <button id="chatSend" class="primary" disabled>Отправить</button>
+            </div>
           </div>
-          <button class="reply-to-cancel ghost" title="Отменить ответ">✕</button>
         </div>
-        <div class="row chat-compose">
-          <select id="chatDestination" class="chat-dest" title="Адресат">
-            <option value="broadcast">📢 Broadcast</option>
-          </select>
-          <input type="text" id="chatInput" placeholder="Написать в mesh…">
-          <button id="chatSend" class="primary">Отправить</button>
-        </div>
-        <div class="muted chat-hint">Broadcast — всем в канале. Выбери узел из списка — личное сообщение.</div>
       </section>
     </div>
   </main>
