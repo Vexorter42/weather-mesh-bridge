@@ -90,7 +90,7 @@
 
       <section class="card">
         <h2>🛰 Узлы mesh-сети</h2>
-        <p class="hint">Последние известные ноды, в порядке свежести. Тыкни узел — откроется его профиль (скоро).</p>
+        <p class="hint">Последние известные ноды, в порядке свежести. Кликни узел — откроется его профиль с телеметрией.</p>
         <div id="nodesList" class="nodes-list">
           <div class="muted">Загрузка…</div>
         </div>
@@ -320,6 +320,22 @@
   </main>
 
   <div id="toast" class="toast"></div>
+
+  <!-- Node profile modal -->
+  <div id="nodeProfile" class="modal" hidden>
+    <div class="modal-backdrop" data-close></div>
+    <div class="modal-content card">
+      <div class="modal-head">
+        <h3 id="profileName">Профиль узла</h3>
+        <button class="modal-close ghost" data-close title="Закрыть">✕</button>
+      </div>
+      <div class="modal-body" id="profileBody"></div>
+      <div class="modal-actions">
+        <button id="profileDm" class="primary">💬 Написать DM</button>
+        <button id="profileMap">🗺 Показать на карте</button>
+      </div>
+    </div>
+  </div>
 
   <template id="slotTemplate">
     <div class="slot" data-id="">

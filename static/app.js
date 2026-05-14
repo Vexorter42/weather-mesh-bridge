@@ -147,6 +147,7 @@ function renderDashboard(s, nodes) {
   for (const n of nodes) {
     const row = document.createElement("div");
     row.className = "node-row";
+    row.title = "Открыть профиль";
     const long = n.long_name || n.node_id || "?";
     const short = n.short_name ? `<span class="node-short">[${escapeHtml(n.short_name)}]</span>` : "";
     const age = n.last_heard ? relTime(n.last_heard) : "—";
@@ -155,6 +156,7 @@ function renderDashboard(s, nodes) {
       `<div><span class="node-name">${escapeHtml(long)}</span>${short}</div>` +
       `<div class="node-age">${age}</div>` +
       `<div>${snr}</div>`;
+    row.addEventListener("click", () => openNodeProfile(n.node_id));
     wrap.appendChild(row);
   }
 }
@@ -186,6 +188,154 @@ function populateDestinationSelectors(nodes) {
     if (prev) sel.value = prev;
   });
 }
+
+// ---------- Node profile modal ----------
+function ensureDmConversation(peerId) {
+  const key = `dm:${peerId}`;
+  if (!CONVS.has(key)) {
+    CONVS.set(key, {
+      key,
+      kind: "dm",
+      channel: null,
+      peerId,
+      lastMsg: null,
+      unread: 0,
+    });
+    renderConvList();
+  }
+  return key;
+}
+
+function _rowDef(label, value, opts = {}) {
+  if (value == null || value === "") return "";
+  const v = escapeHtml(String(value));
+  if (opts.bar != null) {
+    const pct = Math.max(0, Math.min(100, opts.bar));
+    const cls = pct >= 60 ? "high" : pct >= 30 ? "mid" : "low";
+    return `<div class="profile-row">
+      <div class="profile-label">${escapeHtml(label)}</div>
+      <div class="profile-value">${v}
+        <div class="bar ${cls}" style="--pct: ${pct}%"></div>
+      </div>
+    </div>`;
+  }
+  return `<div class="profile-row">
+    <div class="profile-label">${escapeHtml(label)}</div>
+    <div class="profile-value">${v}</div>
+  </div>`;
+}
+
+function openNodeProfile(nodeId) {
+  const n = KNOWN_NODES.find(x => x.node_id === nodeId);
+  if (!n) {
+    toast("Узел больше не виден боту", "err");
+    return;
+  }
+
+  const longName = n.long_name || n.short_name || nodeId;
+  $("#profileName").innerHTML =
+    `<span style="color: var(--accent)">👤</span> ${escapeHtml(longName)}` +
+    (n.short_name ? ` <span class="muted" style="font-size:0.85em">[${escapeHtml(n.short_name)}]</span>` : "");
+
+  const parts = [];
+
+  // Identity
+  parts.push(`<div class="profile-section">Идентификация</div>`);
+  parts.push(_rowDef("ID", n.node_id));
+  if (n.num != null) parts.push(_rowDef("Num", n.num));
+  if (n.hw_model) parts.push(_rowDef("Модель", n.hw_model));
+  if (n.role) parts.push(_rowDef("Роль", n.role));
+
+  // RF
+  parts.push(`<div class="profile-section">Радио</div>`);
+  parts.push(_rowDef("Слышали", n.last_heard ? relTime(n.last_heard) : "—"));
+  if (n.snr != null) parts.push(_rowDef("SNR", Number(n.snr).toFixed(1)));
+
+  // Position
+  if (n.latitude != null && n.longitude != null) {
+    parts.push(`<div class="profile-section">Положение</div>`);
+    parts.push(_rowDef("Координаты", `${n.latitude.toFixed(5)}, ${n.longitude.toFixed(5)}`));
+    if (n.altitude != null) parts.push(_rowDef("Высота", `${Math.round(n.altitude)} м`));
+  }
+
+  // Telemetry
+  const hasTelemetry = n.battery_level != null || n.voltage != null
+                       || n.channel_utilization != null || n.air_util_tx != null
+                       || n.uptime_seconds != null;
+  if (hasTelemetry) {
+    parts.push(`<div class="profile-section">Телеметрия</div>`);
+    if (n.battery_level != null) {
+      parts.push(_rowDef("Батарея", `${n.battery_level}%`, { bar: n.battery_level }));
+    }
+    if (n.voltage != null) parts.push(_rowDef("Напряжение", `${Number(n.voltage).toFixed(2)} В`));
+    if (n.channel_utilization != null) {
+      const pct = Number(n.channel_utilization);
+      parts.push(_rowDef(
+        "Загрузка канала",
+        `${pct.toFixed(1)}%`,
+        { bar: Math.min(100, 100 - pct * 2) },  // invert: высокая загрузка = красная
+      ));
+    }
+    if (n.air_util_tx != null) {
+      parts.push(_rowDef("Air util TX", `${Number(n.air_util_tx).toFixed(1)}%`));
+    }
+    if (n.uptime_seconds != null) {
+      const u = Number(n.uptime_seconds);
+      let s;
+      if (u < 60) s = `${Math.round(u)} с`;
+      else if (u < 3600) s = `${Math.round(u / 60)} мин`;
+      else if (u < 86400) s = `${(u / 3600).toFixed(1)} ч`;
+      else s = `${(u / 86400).toFixed(1)} дн`;
+      parts.push(_rowDef("Аптайм", s));
+    }
+  }
+
+  $("#profileBody").innerHTML = parts.join("");
+  $("#nodeProfile").hidden = false;
+
+  // Wire action buttons (re-bind each open — node changes between calls)
+  $("#profileDm").onclick = () => {
+    closeNodeProfile();
+    ensureDmConversation(nodeId);
+    const tabBtn = document.querySelector('.tab-btn[data-tab="chat"]');
+    if (tabBtn) tabBtn.click();
+    setTimeout(() => selectConversation(`dm:${nodeId}`), 80);
+  };
+
+  $("#profileMap").onclick = () => {
+    closeNodeProfile();
+    const tabBtn = document.querySelector('.tab-btn[data-tab="map"]');
+    if (tabBtn) tabBtn.click();
+    if (n.latitude != null && n.longitude != null) {
+      setTimeout(() => {
+        if (typeof L !== "undefined" && MAP) {
+          MAP.setView([n.latitude, n.longitude], 14);
+          // Pop the corresponding marker, if we can find it
+          MAP_MARKER_LAYER?.eachLayer(m => {
+            const ll = m.getLatLng?.();
+            if (ll && Math.abs(ll.lat - n.latitude) < 1e-5 && Math.abs(ll.lng - n.longitude) < 1e-5) {
+              m.openPopup?.();
+            }
+          });
+        }
+      }, 400);
+    } else {
+      toast("У узла нет координат — он не появится на карте", "");
+    }
+  };
+}
+
+function closeNodeProfile() {
+  $("#nodeProfile").hidden = true;
+}
+
+// Click on backdrop or × closes the modal
+document.getElementById("nodeProfile")?.addEventListener("click", (e) => {
+  if (e.target.matches("[data-close]")) closeNodeProfile();
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !$("#nodeProfile").hidden) closeNodeProfile();
+});
 
 // ---------- Map (Leaflet) ----------
 let MAP = null;
@@ -248,9 +398,21 @@ async function refreshMap() {
       const alt = Number.isFinite(n.altitude) ? `<br>Высота: ${Math.round(n.altitude)} м` : "";
       const popup = `<strong>${escapeHtml(long)}</strong>${escapeHtml(short)}<br>` +
                     `<span class="muted">${lat.toFixed(4)}, ${lon.toFixed(4)}</span><br>` +
-                    `Слышали: ${age}${snr}${alt}`;
+                    `Слышали: ${age}${snr}${alt}` +
+                    `<br><a href="#" class="map-profile-link" data-node-id="${escapeHtml(n.node_id)}">Открыть профиль →</a>`;
       L.marker([lat, lon]).addTo(MAP_MARKER_LAYER).bindPopup(popup);
     }
+    // Delegate clicks inside popups to the node-profile modal
+    map.off("popupopen").on("popupopen", (e) => {
+      const link = e.popup.getElement()?.querySelector(".map-profile-link");
+      if (link) {
+        link.addEventListener("click", (ev) => {
+          ev.preventDefault();
+          const id = link.dataset.nodeId;
+          if (id) openNodeProfile(id);
+        });
+      }
+    });
     if (bounds.length === 1) {
       map.setView(bounds[0], 12);
     } else {
@@ -754,6 +916,75 @@ function selectConversation(key) {
   renderChatLog();
 }
 
+// Maximum messages rendered into the DOM per conversation. Anything older is
+// kept in ALL_MESSAGES (and SQLite) but not painted. Keeps the UI snappy on
+// long-running chats — picking a chat used to lag for seconds with ~200 msgs.
+const CHAT_RENDER_LIMIT = 200;
+
+function _buildMessageElement(m, byMsgId, elements) {
+  // Reaction packets aren't rendered as separate bubbles — they become chips
+  // on their parent message. If the parent is already in our batch, attach
+  // immediately; otherwise stash so a later parent in this same batch picks
+  // it up. (Cross-batch reactions are handled by appendChatMessage's PENDING.)
+  if (m.is_reaction && m.reply_to) {
+    const parent = elements.get(String(m.reply_to));
+    if (parent) {
+      applyReactionChip(parent, m);
+      return null;
+    }
+    if (!PENDING_REACTIONS.has(m.reply_to)) PENDING_REACTIONS.set(m.reply_to, []);
+    PENDING_REACTIONS.get(m.reply_to).push(m);
+    return null;
+  }
+
+  const div = document.createElement("div");
+  div.className = "chat-msg" + (m.incoming ? "" : " outgoing");
+  if (m.msg_id) {
+    div.dataset.meshId = String(m.msg_id);
+    elements.set(String(m.msg_id), div);
+  }
+
+  // Build reply quote from the in-memory parent (no DOM lookup at all).
+  let replyHtml = "";
+  if (m.reply_to && !m.is_reaction) {
+    const parent = byMsgId.get(String(m.reply_to));
+    const name = parent?.from_name || "?";
+    const text = parent ? (parent.text || "") : "(сообщение недоступно)";
+    const preview = text.length > 80 ? text.slice(0, 80) + "…" : text;
+    replyHtml =
+      `<div class="reply-quote" data-target="${m.reply_to}">` +
+        `<span class="reply-quote-arrow">↪</span> ` +
+        `<strong class="reply-quote-name">${escapeHtml(name)}</strong>: ` +
+        `<span class="reply-quote-text">${escapeHtml(preview)}</span>` +
+      `</div>`;
+  }
+
+  const t = new Date(m.time * 1000).toLocaleTimeString();
+  const actions = m.msg_id
+    ? `<button class="reply-btn" title="Ответить" data-msg-id="${m.msg_id}">↩</button>` +
+      `<button class="react-btn" title="Поставить реакцию" data-msg-id="${m.msg_id}">+</button>`
+    : "";
+
+  div.innerHTML =
+    `<div class="meta">` +
+      `<span class="from">${escapeHtml(m.from_name || "?")}</span>` +
+      `<span class="ch">ch${m.channel ?? 0}</span>` +
+      `<span>${t}</span>` +
+      actions +
+    `</div>` +
+    replyHtml +
+    `<div class="text">${escapeHtml(m.text)}</div>` +
+    buildRfMeta(m);
+
+  // Apply any reactions that arrived earlier in this batch waiting for parent.
+  if (m.msg_id && PENDING_REACTIONS.has(m.msg_id)) {
+    for (const r of PENDING_REACTIONS.get(m.msg_id)) applyReactionChip(div, r);
+    PENDING_REACTIONS.delete(m.msg_id);
+  }
+
+  return div;
+}
+
 function renderChatLog() {
   const log = $("#chatLog");
   log.innerHTML = "";
@@ -761,13 +992,42 @@ function renderChatLog() {
     log.innerHTML = "<div class='chat-empty muted'>Выберите канал или собеседника в списке слева.</div>";
     return;
   }
-  const messages = ALL_MESSAGES.filter(m => conversationKey(m) === SELECTED_CONV);
+  let messages = ALL_MESSAGES.filter(m => conversationKey(m) === SELECTED_CONV);
   if (!messages.length) {
     log.innerHTML = "<div class='chat-empty muted'>В этом чате ещё нет сообщений.</div>";
     return;
   }
-  for (const m of messages) appendChatMessage(m);
-  log.scrollTop = log.scrollHeight;
+  const truncated = messages.length > CHAT_RENDER_LIMIT;
+  if (truncated) messages = messages.slice(-CHAT_RENDER_LIMIT);
+
+  // Index ALL conversation messages (not just rendered slice) so reply quotes
+  // can still show preview text when parent is older than the visible window.
+  const byMsgId = new Map();
+  for (const m of ALL_MESSAGES) {
+    if (m.msg_id && conversationKey(m) === SELECTED_CONV) {
+      byMsgId.set(String(m.msg_id), m);
+    }
+  }
+
+  // Build everything in a DocumentFragment — one reflow at the end.
+  PENDING_REACTIONS.clear();
+  const elements = new Map();
+  const fragment = document.createDocumentFragment();
+  if (truncated) {
+    const hint = document.createElement("div");
+    hint.className = "chat-empty muted";
+    hint.style.padding = "6px 10px";
+    hint.style.fontSize = "0.78rem";
+    hint.textContent = `Показаны последние ${CHAT_RENDER_LIMIT} сообщений из ${ALL_MESSAGES.filter(m => conversationKey(m) === SELECTED_CONV).length}.`;
+    fragment.appendChild(hint);
+  }
+  for (const m of messages) {
+    const el = _buildMessageElement(m, byMsgId, elements);
+    if (el) fragment.appendChild(el);
+  }
+  log.appendChild(fragment);
+  // Use rAF so the browser paints first, then scrolls — feels snappier.
+  requestAnimationFrame(() => { log.scrollTop = log.scrollHeight; });
 }
 
 document.getElementById("chatBack")?.addEventListener("click", () => {

@@ -784,6 +784,113 @@ button.run-now:disabled { opacity: 0.5; cursor: wait; }
 .chat-compose { margin-top: 10px; }
 .chat-hint { margin-top: 6px; font-size: 0.78rem; }
 
+/* ---------- Modal (node profile, etc.) ---------- */
+.modal:not([hidden]) {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  animation: modal-fade 0.15s ease;
+}
+.modal-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(2px);
+}
+.modal-content {
+  position: relative;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  width: 460px;
+  max-width: 95vw;
+  max-height: 85vh;
+  overflow-y: auto;
+  padding: 16px 18px 14px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+}
+.modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.modal-head h3 {
+  margin: 0;
+  font-size: 1.05rem;
+  word-break: break-word;
+}
+.modal-close {
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border-radius: 6px;
+  font-size: 1rem;
+}
+.modal-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 14px;
+  font-size: 0.92rem;
+}
+.profile-row {
+  display: grid;
+  grid-template-columns: 130px 1fr;
+  gap: 8px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border);
+}
+.profile-row:last-child { border-bottom: none; }
+.profile-label { color: var(--muted); font-size: 0.85rem; }
+.profile-value { font-variant-numeric: tabular-nums; word-break: break-word; }
+.profile-section {
+  margin-top: 8px;
+  margin-bottom: 4px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.profile-row .bar {
+  position: relative;
+  height: 6px;
+  background: var(--card-2);
+  border-radius: 3px;
+  margin-top: 4px;
+  overflow: hidden;
+}
+.profile-row .bar::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  width: var(--pct, 0%);
+  background: var(--accent);
+  transition: width .2s;
+}
+.profile-row .bar.high::before { background: var(--good); }
+.profile-row .bar.mid::before { background: #d4a017; }
+.profile-row .bar.low::before { background: var(--danger); }
+.modal-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.modal-actions button { flex: 1 1 auto; }
+@keyframes modal-fade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.nodes-list .node-row { cursor: pointer; transition: border-color .12s, background .12s; }
+.nodes-list .node-row:hover { border-color: var(--accent); }
+
 .toast {
   position: fixed;
   bottom: 24px;

@@ -507,8 +507,11 @@ class MeshBridge:
         return out
 
     def get_known_nodes(self) -> list[dict[str, Any]]:
-        """Return a list of nodes the bot has heard from. Used for DM selector
-        and the node-map feature.
+        """Return a list of nodes the bot has heard from. Used for DM selector,
+        node-map and node-profile.
+
+        Includes telemetry (battery, voltage, channel utilization) when the
+        node has shared it through TELEMETRY_APP.
         """
         out: list[dict[str, Any]] = []
         with self._lock:
@@ -521,16 +524,25 @@ class MeshBridge:
                         continue
                     user = n.get("user") or {}
                     position = n.get("position") or {}
+                    metrics = n.get("deviceMetrics") or {}
                     out.append({
                         "node_id": user.get("id") or str(k),
                         "num": n.get("num"),
                         "short_name": user.get("shortName") or "",
                         "long_name": user.get("longName") or "",
+                        "hw_model": user.get("hwModel") or "",
+                        "role": user.get("role") or "",
                         "last_heard": int(n.get("lastHeard") or 0) or None,
                         "snr": n.get("snr"),
                         "latitude": position.get("latitude"),
                         "longitude": position.get("longitude"),
                         "altitude": position.get("altitude"),
+                        # Telemetry — may be missing if the node hasn't sent it
+                        "battery_level": metrics.get("batteryLevel"),
+                        "voltage": metrics.get("voltage"),
+                        "channel_utilization": metrics.get("channelUtilization"),
+                        "air_util_tx": metrics.get("airUtilTx"),
+                        "uptime_seconds": metrics.get("uptimeSeconds"),
                     })
             except Exception:
                 log.exception("Failed to enumerate nodes")
