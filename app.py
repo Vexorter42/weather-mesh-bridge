@@ -12,7 +12,7 @@ import os
 import threading
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Optional
 
@@ -143,6 +143,51 @@ BRIDGE.set_command_handler(_handle_mesh_command)
 # Persistent state for weather-alerts dedup, plus background worker.
 ALERTS_STATE = weather_alerts.AlertsState(BASE_DIR / "alerts_state.json")
 weather_alerts.start_background_worker(load_config, BRIDGE, ALERTS_STATE)
+
+
+def _mesh_healthcheck():
+    """Periodic probe — keeps Heltec connection alive. If the underlying TCP
+    or Serial link dropped silently (common with WiFi blips), we close and
+    reopen so the next send/receive doesn't fail.
+    """
+    try:
+        # Lazily open if we don't have a connection yet.
+        with BRIDGE._lock:
+            iface = BRIDGE._iface
+        if iface is None:
+            log.info("Healthcheck: no interface, opening")
+            try:
+                BRIDGE.connect()
+            except Exception:
+                log.exception("Healthcheck: initial connect failed")
+            return
+
+        # We have an interface — probe it with a heartbeat. The meshtastic
+        # library exposes either sendHeartbeat or _sendHeartbeat depending
+        # on version, so try both.
+        ok = False
+        try:
+            send_hb = getattr(iface, "sendHeartbeat", None) or getattr(iface, "_sendHeartbeat", None)
+            if callable(send_hb):
+                send_hb()
+                ok = True
+            else:
+                # Fallback: just touch nodes to make sure the obj still works
+                _ = getattr(iface, "nodes", None)
+                ok = True
+        except Exception:
+            log.warning("Healthcheck: heartbeat failed, will reconnect")
+            ok = False
+
+        if not ok:
+            try:
+                BRIDGE.close()
+                BRIDGE.connect()
+                log.info("Healthcheck: reconnected after failed probe")
+            except Exception:
+                log.exception("Healthcheck: reconnect failed")
+    except Exception:
+        log.exception("Healthcheck crashed")
 
 scheduler = BackgroundScheduler(timezone="UTC")  # cron triggers carry their own tz
 scheduler.start()
@@ -516,7 +561,13 @@ def api_chat_messages():
 
 @app.route("/api/chat/reply", methods=["POST"])
 def api_chat_reply():
-    """Send a text reply to a previous mesh message."""
+    """Send a text reply to a previous mesh message.
+
+    payload:
+      - text, reply_to (required)
+      - destination (str, optional) — broadcast / node id
+      - channel (int, optional) — override channel index
+    """
     payload = request.get_json(force=True, silent=True) or {}
     text = (payload.get("text") or "").strip()
     reply_to = payload.get("reply_to")
@@ -529,12 +580,14 @@ def api_chat_reply():
     cfg = load_config()
     mesh_cfg = cfg.get("mesh", {}) or {}
     BRIDGE.configure(mesh_cfg)
+    destination = (payload.get("destination") or mesh_cfg.get("destination") or "broadcast")
+    channel_index = _resolve_channel(payload, mesh_cfg)
     try:
         result = BRIDGE.send_reply(
             text,
             reply_to,
-            channel_index=int(mesh_cfg.get("channel_index", 0)),
-            destination=mesh_cfg.get("destination", "broadcast"),
+            channel_index=channel_index,
+            destination=destination,
             chunk_delay=_chunk_delay(mesh_cfg),
         )
     except Exception as exc:
@@ -571,6 +624,17 @@ def api_chat_react():
     return jsonify(result)
 
 
+def _resolve_channel(payload: dict[str, Any], mesh_cfg: dict[str, Any]) -> int:
+    """Pick channel index from payload (per-message) or fall back to global."""
+    raw = payload.get("channel")
+    if raw is None:
+        return int(mesh_cfg.get("channel_index", 0))
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return int(mesh_cfg.get("channel_index", 0))
+
+
 @app.route("/api/chat/send", methods=["POST"])
 def api_chat_send():
     """Send a free-form text message into the mesh.
@@ -578,6 +642,7 @@ def api_chat_send():
     payload:
       - text (str, required)
       - destination (str, optional): "broadcast" or node id (e.g. "!a1b2c3d4").
+      - channel (int, optional): channel index; if omitted, uses global default.
     """
     payload = request.get_json(force=True, silent=True) or {}
     text = (payload.get("text") or "").strip()
@@ -589,10 +654,11 @@ def api_chat_send():
     destination = (payload.get("destination") or mesh_cfg.get("destination") or "broadcast").strip()
     if not destination:
         destination = "broadcast"
+    channel_index = _resolve_channel(payload, mesh_cfg)
     try:
         result = BRIDGE.send_text_chunked(
             text,
-            channel_index=int(mesh_cfg.get("channel_index", 0)),
+            channel_index=channel_index,
             destination=destination,
             chunk_delay=_chunk_delay(mesh_cfg),
         )
@@ -605,6 +671,12 @@ def api_chat_send():
 def api_nodes():
     """List nodes known by the connected Heltec — for DM picker and stats."""
     return jsonify(BRIDGE.get_known_nodes())
+
+
+@app.route("/api/channels", methods=["GET"])
+def api_channels():
+    """List channels configured on the connected Heltec — for chat sidebar."""
+    return jsonify(BRIDGE.get_known_channels())
 
 
 @app.route("/api/scheduler/jobs", methods=["GET"])
@@ -660,6 +732,19 @@ def api_health():
 # ---------------------------------------------------------------------------
 
 reschedule_all()
+
+# Keep Heltec link healthy: every 10 minutes ping it, reconnect on failure.
+# First run shifted 90 seconds after boot to let the initial connection settle.
+scheduler.add_job(
+    _mesh_healthcheck,
+    "interval",
+    minutes=10,
+    id="mesh-healthcheck",
+    replace_existing=True,
+    next_run_time=datetime.utcnow() + timedelta(seconds=90),
+    misfire_grace_time=60,
+    coalesce=True,
+)
 
 
 def _truthy_env(name: str, default: str = "1") -> bool:

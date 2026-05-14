@@ -468,6 +468,44 @@ class MeshBridge:
         except Exception:
             log.exception("Sending command response failed")
 
+    def get_known_channels(self) -> list[dict[str, Any]]:
+        """Return the list of channels configured on the connected Heltec.
+
+        Each entry: {"index", "name", "role"} where role is 'primary' or
+        'secondary'. Disabled channels are skipped. Falls back to a single
+        primary channel 0 if nothing is reported (e.g. node still warming up).
+        """
+        out: list[dict[str, Any]] = []
+        with self._lock:
+            if self._iface is None:
+                return out
+            try:
+                node = getattr(self._iface, "localNode", None)
+                channels = getattr(node, "channels", None) if node else None
+                if channels:
+                    for ch in channels:
+                        try:
+                            role = int(getattr(ch, "role", 0))
+                            if role == 0:  # DISABLED
+                                continue
+                            idx = int(getattr(ch, "index", 0))
+                            settings = getattr(ch, "settings", None)
+                            name = ""
+                            if settings is not None:
+                                name = getattr(settings, "name", "") or ""
+                            out.append({
+                                "index": idx,
+                                "name": name or f"Канал {idx}",
+                                "role": "primary" if role == 1 else "secondary",
+                            })
+                        except Exception:
+                            log.exception("Failed to read channel info")
+            except Exception:
+                log.exception("Failed to enumerate channels")
+        if not out:
+            out.append({"index": 0, "name": "Канал 0", "role": "primary"})
+        return out
+
     def get_known_nodes(self) -> list[dict[str, Any]]:
         """Return a list of nodes the bot has heard from. Used for DM selector
         and the node-map feature.

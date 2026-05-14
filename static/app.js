@@ -104,13 +104,17 @@ let KNOWN_NODES = [];     // last fetched node list (for DM picker)
 
 async function refreshDashboard() {
   try {
-    const [stats, nodes] = await Promise.all([
+    const [stats, nodes, channels] = await Promise.all([
       api("/api/stats"),
       api("/api/nodes").catch(() => []),
+      api("/api/channels").catch(() => []),
     ]);
     KNOWN_NODES = Array.isArray(nodes) ? nodes : [];
+    KNOWN_CHANNELS = Array.isArray(channels) ? channels : [];
     renderDashboard(stats, KNOWN_NODES);
     populateDestinationSelectors(KNOWN_NODES);
+    rebuildConversations();
+    renderConvList();
   } catch (e) { /* silent — dashboard isn't critical */ }
 }
 
@@ -607,6 +611,7 @@ let UNREAD = 0;
 let ALL_MESSAGES = [];      // full log, kept in memory for filtering
 let SELECTED_CONV = null;   // currently displayed conversation key
 let CONVS = new Map();      // convKey -> {key, title, kind, channel, peerId, lastMsg, unread, icon}
+let KNOWN_CHANNELS = [];    // [{index, name, role}] — pre-populates the sidebar even with no messages
 
 const BROADCAST_TO = new Set(["^all", "all", "", null, undefined]);
 
@@ -627,7 +632,10 @@ function lookupNodeName(nodeId) {
 }
 
 function conversationLabel(key) {
-  if (key.startsWith("ch:")) return `📢 Канал ${key.slice(3)}`;
+  if (key.startsWith("ch:")) {
+    const idx = parseInt(key.slice(3), 10);
+    return `📢 ${channelDisplayName(idx)}`;
+  }
   if (key.startsWith("dm:")) {
     const id = key.slice(3);
     return `👤 ${lookupNodeName(id)}`;
@@ -637,6 +645,23 @@ function conversationLabel(key) {
 
 function rebuildConversations() {
   const map = new Map();
+
+  // 1. Pre-populate with every channel configured on the Heltec — that way the
+  //    sidebar shows all channels even if no message has arrived for them yet.
+  for (const ch of KNOWN_CHANNELS) {
+    const key = `ch:${ch.index}`;
+    map.set(key, {
+      key,
+      kind: "channel",
+      channel: ch.index,
+      channelName: ch.name,
+      peerId: null,
+      lastMsg: null,
+      unread: 0,
+    });
+  }
+
+  // 2. Walk messages, creating DM convs and updating lastMsg of channels.
   for (const m of ALL_MESSAGES) {
     const key = conversationKey(m);
     let conv = map.get(key);
@@ -653,7 +678,7 @@ function rebuildConversations() {
     }
     if (m.id > (conv.lastMsg?.id || 0)) conv.lastMsg = m;
   }
-  // Carry over unread counters from the previous CONVS
+  // 3. Carry over unread counters from the previous CONVS map.
   for (const [key, conv] of map) {
     const prev = CONVS.get(key);
     if (prev) conv.unread = prev.unread || 0;
@@ -661,11 +686,21 @@ function rebuildConversations() {
   CONVS = map;
 }
 
+function channelDisplayName(idx) {
+  const ch = KNOWN_CHANNELS.find(c => c.index === idx);
+  return ch?.name || `Канал ${idx}`;
+}
+
 function renderConvList() {
   const wrap = $("#convList");
   wrap.innerHTML = "";
   const convs = [...CONVS.values()].sort((a, b) => {
-    return (b.lastMsg?.id || 0) - (a.lastMsg?.id || 0);
+    // Channels with messages or DMs sort by recency. Empty channels go below.
+    const aId = a.lastMsg?.id || 0;
+    const bId = b.lastMsg?.id || 0;
+    if (aId !== bId) return bId - aId;
+    // Tie-breaker: channel index ascending
+    return (a.channel ?? 99) - (b.channel ?? 99);
   });
   if (!convs.length) {
     wrap.innerHTML = "<div class='muted' style='padding: 12px;'>Чатов пока нет.</div>";
@@ -677,12 +712,12 @@ function renderConvList() {
     if (conv.key === SELECTED_CONV) div.classList.add("active");
     const icon = conv.kind === "channel" ? "📢" : "👤";
     const title = conv.kind === "channel"
-      ? `Канал ${conv.channel}`
+      ? channelDisplayName(conv.channel)
       : lookupNodeName(conv.peerId);
     const preview = conv.lastMsg
       ? (conv.lastMsg.from_name && !conv.lastMsg.incoming ? "Я: " : "")
         + (conv.lastMsg.text || "").slice(0, 60)
-      : "";
+      : (conv.kind === "channel" ? "Сообщений ещё нет" : "");
     const time = conv.lastMsg
       ? new Date(conv.lastMsg.time * 1000).toLocaleTimeString().slice(0, 5)
       : "";
@@ -1117,18 +1152,18 @@ $("#chatSend").addEventListener("click", async () => {
   }
   const conv = CONVS.get(SELECTED_CONV);
   const destination = conv?.kind === "dm" ? conv.peerId : "broadcast";
+  const channel = conv?.kind === "channel" ? conv.channel : null;
+  const body = { text, destination };
+  if (channel != null) body.channel = channel;
   try {
     if (REPLY_TO) {
       await api("/api/chat/reply", {
         method: "POST",
-        body: { text, reply_to: REPLY_TO.msg_id },
+        body: { ...body, reply_to: REPLY_TO.msg_id },
       });
       cancelReply();
     } else {
-      await api("/api/chat/send", {
-        method: "POST",
-        body: { text, destination },
-      });
+      await api("/api/chat/send", { method: "POST", body });
     }
     $("#chatInput").value = "";
     pollChat();
