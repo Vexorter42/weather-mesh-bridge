@@ -66,17 +66,23 @@ class ChatDb:
                     is_reaction INTEGER NOT NULL DEFAULT 0,
                     hops_taken INTEGER,
                     rx_rssi REAL,
-                    rx_snr REAL
+                    rx_snr REAL,
+                    delivery_status TEXT,
+                    delivery_hops INTEGER
                 )
                 """
             )
             c.execute("CREATE INDEX IF NOT EXISTS idx_msg_time ON messages(time)")
             c.execute("CREATE INDEX IF NOT EXISTS idx_msg_mesh_id ON messages(msg_id)")
             c.execute("CREATE INDEX IF NOT EXISTS idx_msg_reply ON messages(reply_to)")
-            # Lightweight migration for older DBs that don't have to_id yet.
+            # Lightweight migration for older DBs.
             cols = {row[1] for row in c.execute("PRAGMA table_info(messages)")}
             if "to_id" not in cols:
                 c.execute("ALTER TABLE messages ADD COLUMN to_id TEXT")
+            if "delivery_status" not in cols:
+                c.execute("ALTER TABLE messages ADD COLUMN delivery_status TEXT")
+            if "delivery_hops" not in cols:
+                c.execute("ALTER TABLE messages ADD COLUMN delivery_hops INTEGER")
 
     # ------------------------------------------------------------------
     # CRUD
@@ -97,8 +103,9 @@ class ChatDb:
                 """
                 INSERT INTO messages (time, from_id, from_name, to_id, channel, text, incoming,
                                       msg_id, reply_to, is_reaction,
-                                      hops_taken, rx_rssi, rx_snr)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                      hops_taken, rx_rssi, rx_snr,
+                                      delivery_status, delivery_hops)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     int(msg.get("time") or time.time()),
@@ -114,11 +121,52 @@ class ChatDb:
                     msg.get("hops_taken"),
                     msg.get("rx_rssi"),
                     msg.get("rx_snr"),
+                    msg.get("delivery_status"),
+                    msg.get("delivery_hops"),
                 ),
             )
             new_id = cursor.lastrowid
             row = c.execute("SELECT * FROM messages WHERE id = ?", (new_id,)).fetchone()
             return self._row_to_dict(row)
+
+    def update_delivery_by_mesh_id(
+        self, mesh_msg_id: int, status: str, hops: Optional[int] = None
+    ) -> Optional[dict[str, Any]]:
+        """Update delivery status of an outgoing message by its Meshtastic packet ID.
+
+        Returns the updated row (or None if no such outgoing message exists).
+        """
+        with self._lock:
+            c = self._connect()
+            # Limit to outgoing — we only track delivery for our own messages
+            cur = c.execute(
+                """
+                UPDATE messages
+                SET delivery_status = ?, delivery_hops = COALESCE(?, delivery_hops)
+                WHERE msg_id = ? AND incoming = 0
+                """,
+                (status, hops, int(mesh_msg_id)),
+            )
+            if cur.rowcount == 0:
+                return None
+            row = c.execute(
+                "SELECT * FROM messages WHERE msg_id = ? AND incoming = 0 ORDER BY id DESC LIMIT 1",
+                (int(mesh_msg_id),),
+            ).fetchone()
+            return self._row_to_dict(row) if row else None
+
+    def get_by_ids(self, ids: list[int]) -> list[dict[str, Any]]:
+        """Fetch multiple messages by their internal IDs. Used for status polling."""
+        if not ids:
+            return []
+        with self._lock:
+            c = self._connect()
+            placeholders = ",".join("?" for _ in ids)
+            rows = c.execute(
+                f"SELECT * FROM messages WHERE id IN ({placeholders})",
+                tuple(int(i) for i in ids),
+            ).fetchall()
+            return [self._row_to_dict(r) for r in rows]
 
     def get_since(self, since_id: int, limit: int = 500) -> list[dict[str, Any]]:
         with self._lock:

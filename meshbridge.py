@@ -129,6 +129,10 @@ class MeshBridge:
         # (used for the !commands feature). Called in a background thread.
         self._command_handler = command_handler
 
+        # Traceroute reply rendezvous — maps "node_id" → {event, result}.
+        self._traceroute_waiters: dict[str, dict[str, Any]] = {}
+        self._traceroute_lock = threading.Lock()
+
     def set_chat_db(self, db: Any) -> None:
         self._db = db
 
@@ -207,10 +211,253 @@ class MeshBridge:
             from pubsub import pub  # type: ignore
 
             pub.subscribe(self._on_text_received, "meshtastic.receive.text")
+            # Generic receive — used to catch TRACEROUTE_APP responses. The
+            # text-specific handler above runs alongside this one for text
+            # packets; we just early-return for non-traceroute portnums here.
+            pub.subscribe(self._on_any_packet, "meshtastic.receive")
             self._pubsub_subscribed = True
-            log.info("Subscribed to meshtastic.receive.text")
+            log.info("Subscribed to meshtastic.receive.text and .receive")
         except Exception:
             log.exception("Failed to subscribe to meshtastic pubsub")
+
+    def _on_any_packet(self, packet=None, interface=None):
+        """Dispatch non-text packets we care about (traceroute, ACKs)."""
+        try:
+            decoded = (packet or {}).get("decoded") or {}
+            portnum = decoded.get("portnum")
+
+            # ROUTING_APP packets are ACK / NAK responses — match by request_id
+            # to update delivery status of our outgoing messages.
+            if portnum == "ROUTING_APP":
+                self._handle_routing_ack(packet, decoded)
+                return
+
+            if portnum != "TRACEROUTE_APP":
+                return
+
+            # The library sometimes pre-decodes the RouteDiscovery into
+            # decoded["routeDiscovery"]; if not, parse the raw payload.
+            rd = decoded.get("routeDiscovery")
+            route_nums: list[int] = []
+            route_back_nums: list[int] = []
+            snr_towards: list[float] = []
+            snr_back: list[float] = []
+            if isinstance(rd, dict):
+                route_nums = list(rd.get("route") or [])
+                route_back_nums = list(rd.get("routeBack") or rd.get("route_back") or [])
+                snr_towards = [s / 4.0 for s in (rd.get("snrTowards") or rd.get("snr_towards") or [])]
+                snr_back = [s / 4.0 for s in (rd.get("snrBack") or rd.get("snr_back") or [])]
+            else:
+                try:
+                    from meshtastic import mesh_pb2  # type: ignore
+                    payload = decoded.get("payload")
+                    if payload:
+                        proto = mesh_pb2.RouteDiscovery()
+                        proto.ParseFromString(payload)
+                        route_nums = list(proto.route)
+                        route_back_nums = list(getattr(proto, "route_back", []) or [])
+                        # snr values are stored as int8 scaled ×4
+                        snr_towards = [s / 4.0 for s in getattr(proto, "snr_towards", [])]
+                        snr_back    = [s / 4.0 for s in getattr(proto, "snr_back", [])]
+                except Exception:
+                    log.exception("Failed to decode RouteDiscovery payload")
+
+            from_id = packet.get("fromId") or packet.get("from")
+
+            # Resolve readable names for every hop on each path
+            def _to_hop_list(nums: list[int]) -> list[dict]:
+                out = []
+                for num in nums:
+                    name = self._resolve_name(num)
+                    hop_id = f"!{int(num):08x}" if isinstance(num, int) else str(num)
+                    out.append({"node_id": hop_id, "name": name, "num": int(num)})
+                return out
+
+            hops_forward = _to_hop_list(route_nums)
+            hops_back    = _to_hop_list(route_back_nums)
+
+            # Resolve "our" node — useful for the map so the UI knows where the
+            # forward arrow starts / the return arrow ends.
+            me = None
+            try:
+                my_info = getattr(self._iface, "myInfo", None)
+                my_num = getattr(my_info, "my_node_num", None) if my_info else None
+                if my_num is not None:
+                    me = {
+                        "node_id": f"!{int(my_num):08x}",
+                        "name": self._resolve_name(my_num),
+                        "num": int(my_num),
+                    }
+            except Exception:
+                me = None
+
+            result = {
+                "from_id": str(from_id) if from_id else None,
+                "from_name": self._resolve_name(from_id) if from_id else "?",
+                # Backward-compatible alias (some older UI code reads `hops`).
+                "hops": hops_forward,
+                "hops_forward": hops_forward,
+                "hops_back": hops_back,
+                "snr_towards": snr_towards,
+                "snr_back": snr_back,
+                "rx_snr": packet.get("rxSnr"),
+                "rx_rssi": packet.get("rxRssi"),
+                "me": me,
+            }
+            log.info(
+                "Traceroute reply from %s: forward=%s, back=%s",
+                from_id,
+                [h["name"] for h in hops_forward],
+                [h["name"] for h in hops_back],
+            )
+
+            # Wake any waiter keyed by that node id (we accept either the
+            # short hex or the numeric form).
+            keys_to_try = []
+            if from_id:
+                keys_to_try.append(str(from_id))
+                try:
+                    keys_to_try.append(f"!{int(from_id):08x}")
+                except (TypeError, ValueError):
+                    pass
+
+            with self._traceroute_lock:
+                for k in keys_to_try:
+                    waiter = self._traceroute_waiters.get(k)
+                    if waiter is not None:
+                        waiter["result"] = result
+                        waiter["event"].set()
+                        break
+        except Exception:
+            log.exception("on_any_packet crashed")
+
+    def _handle_routing_ack(self, packet: dict, decoded: dict) -> None:
+        """Update delivery_status of an outgoing message when a ROUTING_APP
+        packet arrives that references it via request_id.
+        """
+        if self._db is None:
+            return
+        # request_id is the mesh packet ID of the message being ACKed.
+        # meshtastic-python serialises proto fields to camelCase ("requestId")
+        # in some versions and snake_case in others — handle both.
+        req_id = (
+            decoded.get("requestId")
+            or decoded.get("request_id")
+        )
+        if req_id is None:
+            routing = decoded.get("routing") or {}
+            if isinstance(routing, dict):
+                req_id = routing.get("requestId") or routing.get("request_id")
+        try:
+            req_id = int(req_id) if req_id is not None else None
+        except (TypeError, ValueError):
+            req_id = None
+        log.info(
+            "ROUTING_APP received: req_id=%s, from=%s, raw_decoded_keys=%s",
+            req_id, packet.get("fromId"), list(decoded.keys()),
+        )
+        if not req_id:
+            return
+
+        # error_reason: 0 = NONE (success), anything else = failure
+        err = 0
+        routing = decoded.get("routing")
+        if isinstance(routing, dict):
+            err = routing.get("errorReason") or routing.get("error_reason") or 0
+        else:
+            err = decoded.get("errorReason") or decoded.get("error_reason") or 0
+        try:
+            err = int(err) if err else 0
+        except (TypeError, ValueError):
+            err = 0
+
+        # hops taken by the ACK packet — proxy for hops to destination
+        hops_taken = None
+        try:
+            hop_start = packet.get("hopStart")
+            hop_limit = packet.get("hopLimit")
+            if hop_start is not None and hop_limit is not None:
+                hops_taken = max(0, int(hop_start) - int(hop_limit))
+        except (TypeError, ValueError):
+            hops_taken = None
+
+        status = "delivered" if err == 0 else "error"
+        try:
+            row = self._db.update_delivery_by_mesh_id(req_id, status, hops=hops_taken)
+            if row:
+                log.info(
+                    "Delivery ACK: mesh_id=%s → %s (hops=%s, err=%s)",
+                    req_id, status, hops_taken, err,
+                )
+        except Exception:
+            log.exception("Failed to update delivery status")
+
+    def traceroute(self, destination: str, hop_limit: int = 5,
+                   channel_index: int = 0, timeout: float = 30.0) -> dict[str, Any]:
+        """Send a traceroute request and block waiting for the reply.
+
+        Returns a dict { hops: [{node_id, name, num}], snr_towards: [...],
+        rx_snr, rx_rssi } or { error } on timeout / send failure.
+        """
+        if not destination or destination in ("broadcast", "^all"):
+            return {"error": "Нужен конкретный узел, не broadcast"}
+
+        start_ts = time.time()
+        event = threading.Event()
+        waiter = {"event": event, "result": None}
+        with self._traceroute_lock:
+            self._traceroute_waiters[str(destination)] = waiter
+
+        with self._lock:
+            try:
+                iface = self._ensure_locked()
+                send_fn = getattr(iface, "sendTraceRoute", None)
+                if not callable(send_fn):
+                    return {"error": "Эта версия meshtastic-библиотеки не умеет sendTraceRoute"}
+                # The library version that ships in pypi has sendTraceRoute(dest, hopLimit, channelIndex)
+                # — but it ALSO blocks on its own internal waiter and prints to stdout.
+                # We use a non-blocking workaround: build the packet manually.
+                try:
+                    from meshtastic import BROADCAST_NUM, mesh_pb2, portnums_pb2  # type: ignore
+                    rd = mesh_pb2.RouteDiscovery()
+                    data = mesh_pb2.Data()
+                    data.portnum = portnums_pb2.PortNum.TRACEROUTE_APP
+                    data.payload = rd.SerializeToString()
+                    data.want_response = True
+
+                    pkt = mesh_pb2.MeshPacket()
+                    pkt.decoded.CopyFrom(data)
+                    pkt.channel = int(channel_index)
+                    pkt.hop_limit = int(hop_limit)
+                    pkt.want_ack = True
+                    pkt.id = iface._generatePacketId()
+                    iface._sendPacket(pkt, destinationId=destination)
+                    log.info("Traceroute → %s sent (id=%s, hop_limit=%d)",
+                             destination, pkt.id, hop_limit)
+                except Exception as exc:
+                    log.exception("Manual traceroute send failed, will try library API")
+                    # Fallback to library call (will block its own thread)
+                    threading.Thread(
+                        target=lambda: send_fn(destination, hop_limit, channel_index),
+                        daemon=True,
+                    ).start()
+            except Exception as exc:
+                with self._traceroute_lock:
+                    self._traceroute_waiters.pop(str(destination), None)
+                return {"error": f"Не удалось отправить traceroute: {exc}"}
+
+        # Wait outside the bridge lock so other operations can proceed.
+        got = event.wait(timeout)
+        with self._traceroute_lock:
+            self._traceroute_waiters.pop(str(destination), None)
+        if not got or waiter["result"] is None:
+            return {
+                "error": f"Узел {destination} не ответил за {int(timeout)} сек",
+                "elapsed_seconds": round(time.time() - start_ts, 2),
+            }
+        result = waiter["result"]
+        result["elapsed_seconds"] = round(time.time() - start_ts, 2)
+        return result
 
     def _close_locked(self):
         if self._iface is not None:
@@ -259,7 +506,7 @@ class MeshBridge:
                     nodes = getattr(self._iface, "nodes", None) or {}
                     info["my_node_num"] = getattr(my_info, "my_node_num", None)
                     info["nodes_known"] = len(nodes)
-                    # «Онлайн» — те, чей last_heard был не дальше часа назад.
+                    # «Онлайн» — те, чей last_heard был не дальше двух часов назад.
                     now = int(time.time())
                     online = 0
                     for n in nodes.values():
@@ -269,8 +516,10 @@ class MeshBridge:
                             lh = int(n.get("lastHeard") or 0)
                         except (TypeError, ValueError):
                             lh = 0
-                        if lh and (now - lh) < 3600:
+                        if lh and (now - lh) < 7200:
                             online += 1
+                    info["nodes_online_2h"] = online
+                    # Legacy key kept for backward compat with older UIs.
                     info["nodes_online_1h"] = online
                 except Exception as exc:
                     info["info_error"] = str(exc)
@@ -314,7 +563,13 @@ class MeshBridge:
         hops_taken: Optional[int] = None,
         rx_rssi: Optional[float] = None,
         rx_snr: Optional[float] = None,
+        delivery_status: Optional[str] = None,
     ) -> dict[str, Any]:
+        # For outgoing messages we default to "enroute" — the packet is already
+        # on the air (we wouldn't be here if _sendPacket had thrown). Status
+        # then transitions to "delivered"/"error" when a ROUTING_APP ACK arrives.
+        if not incoming and delivery_status is None and msg_id and not is_reaction:
+            delivery_status = "enroute"
         msg = {
             "time": int(time.time()),
             "from_id": from_id,
@@ -329,6 +584,7 @@ class MeshBridge:
             "hops_taken": hops_taken,
             "rx_rssi": rx_rssi,
             "rx_snr": rx_snr,
+            "delivery_status": delivery_status,
         }
         if self._db is None:
             log.warning("ChatDb is not set on MeshBridge; message will be dropped")
@@ -468,6 +724,227 @@ class MeshBridge:
         except Exception:
             log.exception("Sending command response failed")
 
+    # ------------------------------------------------------------------
+    # Heltec device configuration (long/short name, region, role, ...)
+    # ------------------------------------------------------------------
+
+    # Region codes (LoRa frequency band) — mirrored from
+    # meshtastic.config_pb2.Config.LoRaConfig.RegionCode enum so the UI can
+    # display human-friendly labels without needing to import protobufs.
+    REGION_CODES: list[tuple[int, str]] = [
+        (0, "UNSET (не выбран)"),
+        (1, "US — 902–928 МГц"),
+        (2, "EU_433 — 433 МГц"),
+        (3, "EU_868 — 868 МГц"),
+        (4, "CN — 470–510 МГц"),
+        (5, "JP — 920–923 МГц"),
+        (6, "ANZ — 915–928 МГц"),
+        (7, "KR — 920–923 МГц"),
+        (8, "TW — 920–925 МГц"),
+        (9, "RU — 868–870 МГц"),
+        (10, "IN — 865–867 МГц"),
+        (11, "NZ_865 — 864–868 МГц"),
+        (12, "TH — 920–925 МГц"),
+        (13, "LORA_24 — 2.4 ГГц"),
+        (14, "UA_433 — 433 МГц"),
+        (15, "UA_868 — 868 МГц"),
+        (16, "MY_433 — 433 МГц"),
+        (17, "MY_919 — 919–924 МГц"),
+        (18, "SG_923 — 917–925 МГц"),
+    ]
+
+    # Device roles — mirrored from DeviceConfig.Role enum.
+    ROLE_CODES: list[tuple[int, str]] = [
+        (0, "CLIENT — обычный клиент"),
+        (1, "CLIENT_MUTE — не ретранслирует"),
+        (2, "ROUTER — постоянный ретранслятор"),
+        (4, "REPEATER — выделенный репитер"),
+        (5, "TRACKER — GPS-трекер"),
+        (6, "SENSOR — сенсор телеметрии"),
+        (7, "TAK"),
+        (8, "CLIENT_HIDDEN — скрытый"),
+        (9, "LOST_AND_FOUND"),
+        (10, "TAK_TRACKER"),
+        (11, "ROUTER_LATE — поздний ретранслятор"),
+    ]
+
+    # LoRa modem preset (speed vs range trade-off).
+    MODEM_PRESETS: list[tuple[int, str]] = [
+        (0, "LONG_FAST (по умолчанию)"),
+        (1, "LONG_SLOW"),
+        (3, "MEDIUM_SLOW"),
+        (4, "MEDIUM_FAST"),
+        (5, "SHORT_SLOW"),
+        (6, "SHORT_FAST"),
+        (7, "LONG_MODERATE"),
+        (8, "SHORT_TURBO"),
+    ]
+
+    def get_device_info(self) -> dict[str, Any]:
+        """Read current Heltec/Meshtastic local config.
+
+        Returns a flat dict with the fields exposed in the UI. Empty dict if
+        the link isn't connected yet.
+        """
+        info: dict[str, Any] = {
+            "connected": False,
+            "regions": [{"value": v, "label": l} for v, l in self.REGION_CODES],
+            "roles": [{"value": v, "label": l} for v, l in self.ROLE_CODES],
+            "modem_presets": [{"value": v, "label": l} for v, l in self.MODEM_PRESETS],
+        }
+        with self._lock:
+            if self._iface is None:
+                return info
+            try:
+                node = getattr(self._iface, "localNode", None)
+                my_info = getattr(self._iface, "myInfo", None)
+                meta = getattr(self._iface, "metadata", None)
+
+                # Owner name comes from the User proto in nodes[<my_num>].user
+                my_num = getattr(my_info, "my_node_num", None) if my_info else None
+                nodes = getattr(self._iface, "nodes", None) or {}
+                me_user = {}
+                if my_num is not None:
+                    for n in nodes.values():
+                        if isinstance(n, dict) and n.get("num") == my_num:
+                            me_user = n.get("user") or {}
+                            break
+
+                info["long_name"] = me_user.get("longName", "")
+                info["short_name"] = me_user.get("shortName", "")
+                info["hw_model"] = me_user.get("hwModel", "")
+                info["my_node_num"] = my_num
+
+                if meta is not None:
+                    info["firmware_version"] = getattr(meta, "firmware_version", "") or ""
+
+                local_cfg = getattr(node, "localConfig", None) if node else None
+                if local_cfg is not None:
+                    lora = getattr(local_cfg, "lora", None)
+                    device = getattr(local_cfg, "device", None)
+                    if lora is not None:
+                        info["region"] = int(getattr(lora, "region", 0))
+                        info["hop_limit"] = int(getattr(lora, "hop_limit", 3))
+                        info["modem_preset"] = int(getattr(lora, "modem_preset", 0))
+                        info["use_preset"] = bool(getattr(lora, "use_preset", True))
+                        info["tx_enabled"] = bool(getattr(lora, "tx_enabled", True))
+                        info["tx_power"] = int(getattr(lora, "tx_power", 0))
+                    if device is not None:
+                        info["role"] = int(getattr(device, "role", 0))
+
+                info["connected"] = True
+            except Exception as exc:
+                log.exception("Failed to read device info")
+                info["error"] = str(exc)
+        return info
+
+    def set_device_settings(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Apply a partial update to Heltec settings.
+
+        Accepts any of: long_name, short_name, region, role, hop_limit,
+        modem_preset, tx_enabled, tx_power.
+
+        Each change goes through a settings-transaction so the device commits
+        them atomically and the radio reloads once.
+        """
+        with self._lock:
+            iface = self._ensure_locked()
+            node = getattr(iface, "localNode", None)
+            if node is None:
+                raise RuntimeError("Нода ещё не отдала localConfig — попробуй через пару секунд.")
+
+            applied: list[str] = []
+
+            # Owner name (long + short) — separate admin op, not part of localConfig.
+            long_name = payload.get("long_name")
+            short_name = payload.get("short_name")
+            if long_name is not None or short_name is not None:
+                try:
+                    set_owner = getattr(node, "setOwner", None)
+                    if not callable(set_owner):
+                        raise RuntimeError("Эта версия meshtastic-библиотеки не умеет setOwner")
+                    kw: dict[str, Any] = {}
+                    if long_name is not None:
+                        kw["long_name"] = str(long_name)[:39]
+                    if short_name is not None:
+                        kw["short_name"] = str(short_name)[:4]
+                    set_owner(**kw)
+                    applied.append("owner")
+                except Exception as exc:
+                    log.exception("setOwner failed")
+                    raise RuntimeError(f"Не удалось сменить имя ноды: {exc}") from exc
+
+            # LoRa / device settings — go through writeConfig
+            lora_changed = False
+            device_changed = False
+            local_cfg = getattr(node, "localConfig", None)
+            if local_cfg is None:
+                if applied:
+                    return {"applied": applied}
+                raise RuntimeError("localConfig недоступен — нода не ответила")
+
+            lora = getattr(local_cfg, "lora", None)
+            device = getattr(local_cfg, "device", None)
+
+            if "region" in payload and lora is not None:
+                lora.region = int(payload["region"])
+                lora_changed = True
+            if "hop_limit" in payload and lora is not None:
+                hl = max(1, min(7, int(payload["hop_limit"])))
+                lora.hop_limit = hl
+                lora_changed = True
+            if "modem_preset" in payload and lora is not None:
+                lora.modem_preset = int(payload["modem_preset"])
+                lora.use_preset = True
+                lora_changed = True
+            if "tx_enabled" in payload and lora is not None:
+                lora.tx_enabled = bool(payload["tx_enabled"])
+                lora_changed = True
+            if "tx_power" in payload and lora is not None:
+                lora.tx_power = int(payload["tx_power"])
+                lora_changed = True
+
+            if "role" in payload and device is not None:
+                device.role = int(payload["role"])
+                device_changed = True
+
+            if lora_changed or device_changed:
+                try:
+                    begin = getattr(node, "beginSettingsTransaction", None)
+                    commit = getattr(node, "commitSettingsTransaction", None)
+                    if callable(begin):
+                        begin()
+                    if lora_changed:
+                        node.writeConfig("lora")
+                        applied.append("lora")
+                    if device_changed:
+                        node.writeConfig("device")
+                        applied.append("device")
+                    if callable(commit):
+                        commit()
+                except Exception as exc:
+                    log.exception("writeConfig failed")
+                    raise RuntimeError(f"Не удалось применить настройки: {exc}") from exc
+
+            return {"applied": applied}
+
+    def reboot_device(self, delay_seconds: int = 5) -> dict[str, Any]:
+        """Tell the Heltec to reboot after `delay_seconds`."""
+        with self._lock:
+            iface = self._ensure_locked()
+            node = getattr(iface, "localNode", None)
+            if node is None:
+                raise RuntimeError("Нет соединения с Heltec")
+            reboot = getattr(node, "reboot", None)
+            if not callable(reboot):
+                raise RuntimeError("Эта версия meshtastic-библиотеки не умеет reboot")
+            try:
+                reboot(int(delay_seconds))
+            except TypeError:
+                # старые версии принимают позиционный/без аргумента
+                reboot()
+        return {"ok": True, "delay": int(delay_seconds)}
+
     def get_known_channels(self) -> list[dict[str, Any]]:
         """Return the list of channels configured on the connected Heltec.
 
@@ -569,6 +1046,10 @@ class MeshBridge:
                 kwargs = {"channelIndex": int(channel_index)}
                 if destination and destination != "broadcast":
                     kwargs["destinationId"] = destination
+                    # Ask radio-level for ACK so the destination's firmware sends
+                    # a Routing packet back — that's what we use to flip the
+                    # delivery indicator from ☁ to ✓✓.
+                    kwargs["wantAck"] = True
                 packet = iface.sendText(text, **kwargs)
                 pkt_id = None
                 try:
@@ -635,6 +1116,8 @@ class MeshBridge:
                 packet.id = iface._generatePacketId()
 
                 dest = BROADCAST_ADDR if destination == "broadcast" else destination
+                if dest != BROADCAST_ADDR:
+                    packet.want_ack = True  # DMs need ACK for delivery indicator
                 iface._sendPacket(packet, destinationId=dest)
                 pkt_id = packet.id
             except Exception as exc:
@@ -688,6 +1171,8 @@ class MeshBridge:
                 packet.id = iface._generatePacketId()
 
                 dest = BROADCAST_ADDR if destination == "broadcast" else destination
+                if dest != BROADCAST_ADDR:
+                    packet.want_ack = True  # DMs need ACK for delivery indicator
                 iface._sendPacket(packet, destinationId=dest)
                 pkt_id = packet.id
             except Exception as exc:

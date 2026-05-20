@@ -292,6 +292,9 @@ function openNodeProfile(nodeId) {
 
   $("#profileBody").innerHTML = parts.join("");
   $("#nodeProfile").hidden = false;
+  // Reset traceroute panel between opens
+  const tr = $("#tracerouteResult");
+  if (tr) { tr.hidden = true; tr.innerHTML = ""; }
 
   // Wire action buttons (re-bind each open — node changes between calls)
   $("#profileDm").onclick = () => {
@@ -300,6 +303,28 @@ function openNodeProfile(nodeId) {
     const tabBtn = document.querySelector('.tab-btn[data-tab="chat"]');
     if (tabBtn) tabBtn.click();
     setTimeout(() => selectConversation(`dm:${nodeId}`), 80);
+  };
+
+  $("#profileTrace").onclick = async () => {
+    const out = $("#tracerouteResult");
+    out.hidden = false;
+    out.innerHTML = `<div class="muted">📡 Шлю traceroute, жду ответа (до 30 сек)…</div>`;
+    const btn = $("#profileTrace");
+    btn.disabled = true;
+    const origText = btn.textContent;
+    btn.textContent = "🛰 Идёт…";
+    try {
+      const r = await api("/api/mesh/traceroute", {
+        method: "POST",
+        body: { destination: nodeId, hop_limit: 5, timeout: 30 },
+      });
+      renderTracerouteResult(out, r, nodeId, n);
+    } catch (e) {
+      out.innerHTML = `<div class="muted" style="color: var(--danger)">⚠️ ${escapeHtml(e.message)}</div>`;
+    } finally {
+      btn.disabled = false;
+      btn.textContent = origText;
+    }
   };
 
   $("#profileMap").onclick = () => {
@@ -341,6 +366,268 @@ document.addEventListener("keydown", (e) => {
 let MAP = null;
 let MAP_MARKER_LAYER = null;
 let MAP_RETRIES = 0;
+let TRACEROUTE_LAYER = null;          // Leaflet layer-group with the active traceroute drawing
+let LAST_TRACEROUTE = null;           // Latest traceroute result (for "Show on map" button)
+
+// ---------- Traceroute rendering ----------
+
+/** Render a rich traceroute result into the given container. */
+function renderTracerouteResult(out, r, nodeId, destNode) {
+  if (!r || r.error) {
+    const err = r?.error || "Неизвестная ошибка";
+    const elapsed = r?.elapsed_seconds != null ? ` · ${r.elapsed_seconds.toFixed(1)} сек` : "";
+    out.innerHTML = `<div class="muted" style="color: var(--danger)">⚠️ ${escapeHtml(err)}${elapsed}</div>`;
+    LAST_TRACEROUTE = null;
+    return;
+  }
+
+  LAST_TRACEROUTE = { ...r, destNodeId: nodeId, destNode };
+
+  const fwd = r.hops_forward || r.hops || [];
+  const back = r.hops_back || [];
+  const elapsed = r.elapsed_seconds != null ? r.elapsed_seconds.toFixed(1) + ' сек' : '—';
+
+  // Header with destination + elapsed time
+  let html = `<div class="trace-head">
+    <span>📡 Traceroute → <strong>${escapeHtml(r.from_name || nodeId)}</strong></span>
+    <span class="trace-elapsed">⏱ ${elapsed}</span>
+  </div>`;
+
+  // Stats row (last-hop RSSI/SNR — what we measured on the response packet)
+  const rssi = r.rx_rssi != null ? `${Math.round(r.rx_rssi)} dBm` : '—';
+  const snr  = r.rx_snr  != null ? r.rx_snr.toFixed(1) : '—';
+  html += `<div class="trace-stats">
+    <span class="trace-stat">📶 RSSI <strong>${rssi}</strong></span>
+    <span class="trace-stat">📊 SNR <strong>${snr}</strong></span>
+    <span class="trace-stat">↯ Hops <strong>${fwd.length}</strong></span>
+  </div>`;
+
+  // Forward path
+  html += `<div class="trace-section trace-section-fwd">
+    <span class="trace-dir red">→</span> Туда (${fwd.length} ${fwd.length === 1 ? 'hop' : 'hops'})
+  </div>`;
+  if (fwd.length) {
+    html += fwd.map((h, i) => {
+      const s = r.snr_towards && r.snr_towards[i] != null
+        ? `<span class="trace-snr">SNR ${r.snr_towards[i].toFixed(1)}</span>` : "";
+      return `<div class="trace-hop">
+        <span class="trace-num red">${i + 1}</span>
+        <span class="trace-name">${escapeHtml(h.name || h.node_id)}</span>
+        <span class="trace-id muted">${escapeHtml(h.node_id)}</span>
+        ${s}
+      </div>`;
+    }).join("");
+  } else {
+    html += `<div class="muted trace-direct">🎯 Без ретрансляторов — узел в прямой видимости</div>`;
+  }
+
+  // Backward path
+  if (back.length) {
+    html += `<div class="trace-section trace-section-back">
+      <span class="trace-dir blue">←</span> Обратно (${back.length} ${back.length === 1 ? 'hop' : 'hops'})
+    </div>`;
+    html += back.map((h, i) => {
+      const s = r.snr_back && r.snr_back[i] != null
+        ? `<span class="trace-snr">SNR ${r.snr_back[i].toFixed(1)}</span>` : "";
+      return `<div class="trace-hop">
+        <span class="trace-num blue">${i + 1}</span>
+        <span class="trace-name">${escapeHtml(h.name || h.node_id)}</span>
+        <span class="trace-id muted">${escapeHtml(h.node_id)}</span>
+        ${s}
+      </div>`;
+    }).join("");
+  } else if (fwd.length) {
+    // We have forward hops but no back hops — possibly returned via different path
+    // that the firmware didn't report. Don't show anything; not useful noise.
+  }
+
+  // Map button — only if we have at least one node with coordinates
+  html += `<div class="trace-actions">
+    <button class="ghost" id="traceMapBtn">🗺 Показать на карте</button>
+  </div>`;
+
+  out.innerHTML = html;
+
+  // Wire the map button now that the HTML is in place
+  const mapBtn = out.querySelector("#traceMapBtn");
+  if (mapBtn) {
+    mapBtn.onclick = () => showTraceOnMap(LAST_TRACEROUTE);
+  }
+}
+
+// --- Geometry helpers for the map ---
+function _bearing(lat1, lng1, lat2, lng2) {
+  const φ1 = lat1 * Math.PI / 180, φ2 = lat2 * Math.PI / 180;
+  const Δλ = (lng2 - lng1) * Math.PI / 180;
+  const y = Math.sin(Δλ) * Math.cos(φ2);
+  const x = Math.cos(φ1) * Math.sin(φ2) - Math.sin(φ1) * Math.cos(φ2) * Math.cos(Δλ);
+  return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
+}
+function _mid(lat1, lng1, lat2, lng2) {
+  return [(lat1 + lat2) / 2, (lng1 + lng2) / 2];
+}
+function _findCoords(nodeId, nodeNum) {
+  for (const n of KNOWN_NODES) {
+    if ((nodeId && n.node_id === nodeId) || (nodeNum != null && String(n.num) === String(nodeNum))) {
+      if (n.latitude != null && n.longitude != null) {
+        return {
+          lat: n.latitude,
+          lng: n.longitude,
+          name: n.long_name || n.short_name || nodeId || `!${nodeNum}`,
+        };
+      }
+      return null;
+    }
+  }
+  return null;
+}
+
+/** Switch to the map tab and draw the forward (red) + return (blue) routes. */
+async function showTraceOnMap(r) {
+  if (!r) { toast("Нет данных traceroute для отрисовки", "err"); return; }
+  closeNodeProfile();
+
+  const tabBtn = document.querySelector('.tab-btn[data-tab="map"]');
+  if (tabBtn) tabBtn.click();
+
+  // Make sure we have fresh node positions — without this, _findCoords may
+  // return null for nodes the user hasn't seen on the Home tab yet.
+  try {
+    const nodes = await api("/api/nodes");
+    if (Array.isArray(nodes)) KNOWN_NODES = nodes;
+  } catch (e) {
+    log?.warn?.("Failed to refresh nodes before drawing trace:", e);
+  }
+
+  // Give Leaflet a moment if the map tab was previously hidden.
+  setTimeout(() => {
+    const map = ensureMap();
+    if (!map) { toast("Карта ещё не загрузилась", "err"); return; }
+
+    // Clean previous traceroute drawing (layer + legend)
+    if (TRACEROUTE_LAYER) {
+      if (TRACEROUTE_LAYER._legendControl) {
+        try { map.removeControl(TRACEROUTE_LAYER._legendControl); } catch {}
+      }
+      TRACEROUTE_LAYER.remove();
+      TRACEROUTE_LAYER = null;
+    }
+    TRACEROUTE_LAYER = L.layerGroup().addTo(map);
+
+    // Resolve endpoint coordinates
+    const meC   = r.me        ? _findCoords(r.me.node_id, r.me.num) : null;
+    const destC = r.from_id   ? _findCoords(r.from_id, null) : null;
+
+    if (!meC && !destC) {
+      toast("Ни у тебя, ни у получателя нет координат — рисовать нечего 😕", "err");
+      return;
+    }
+    if (!meC)   toast("У бота нет координат — стрелка пойдёт не от тебя", "");
+    if (!destC) toast("У получателя нет координат — точка назначения пропадает", "");
+
+    // Build forward node sequence: [me, ...hops_forward, dest]
+    const fwdSeq = [];
+    if (meC)   fwdSeq.push({ ...meC,   role: "me",    label: r.me?.name || "Я" });
+    for (const h of (r.hops_forward || [])) {
+      const c = _findCoords(h.node_id, h.num);
+      if (c) fwdSeq.push({ ...c, role: "relay", label: h.name || h.node_id });
+    }
+    if (destC) fwdSeq.push({ ...destC, role: "dest",  label: r.from_name || r.from_id });
+
+    // Backward: [dest, ...hops_back, me]
+    const backSeq = [];
+    if (destC) backSeq.push({ ...destC, role: "dest",  label: r.from_name || r.from_id });
+    for (const h of (r.hops_back || [])) {
+      const c = _findCoords(h.node_id, h.num);
+      if (c) backSeq.push({ ...c, role: "relay", label: h.name || h.node_id });
+    }
+    if (meC)   backSeq.push({ ...meC,   role: "me",    label: r.me?.name || "Я" });
+
+    const drawPath = (seq, color, offset, dashed) => {
+      if (seq.length < 2) return;
+      // Slight offset for the return path so the two lines don't overlap.
+      const off = offset || 0;
+      const pts = seq.map(s => [s.lat + off, s.lng + off]);
+      L.polyline(pts, {
+        color, weight: 3.5, opacity: 0.85,
+        dashArray: dashed ? "8,8" : null,
+      }).addTo(TRACEROUTE_LAYER);
+      // Arrow at the midpoint of every segment
+      for (let i = 0; i < seq.length - 1; i++) {
+        const a = seq[i], b = seq[i + 1];
+        const mid = _mid(a.lat + off, a.lng + off, b.lat + off, b.lng + off);
+        const deg = _bearing(a.lat, a.lng, b.lat, b.lng);
+        L.marker(mid, {
+          interactive: false,
+          icon: L.divIcon({
+            className: "trace-arrow-marker",
+            html: `<div class="trace-arrow-glyph" style="color:${color}; transform:rotate(${deg - 90}deg)">▶</div>`,
+            iconSize: [18, 18],
+            iconAnchor: [9, 9],
+          }),
+        }).addTo(TRACEROUTE_LAYER);
+      }
+    };
+
+    drawPath(fwdSeq,  "#ff5a6a", 0,      false);  // forward — red, solid
+    drawPath(backSeq, "#5a9eff", 0.0003, true);   // backward — blue, dashed, slightly offset
+
+    // Numbered/role markers at every unique coordinate
+    const placed = new Map();   // key -> { role, label }
+    const rank = { me: 3, dest: 2, relay: 1 };
+    const allNodes = [...fwdSeq, ...backSeq];
+    for (const n of allNodes) {
+      const k = `${n.lat.toFixed(5)},${n.lng.toFixed(5)}`;
+      const prev = placed.get(k);
+      if (!prev || rank[n.role] > rank[prev.role]) placed.set(k, n);
+    }
+    let relayCounter = 1;
+    for (const [k, n] of placed) {
+      const [lat, lng] = k.split(",").map(Number);
+      let html, popup;
+      if (n.role === "me") {
+        html = `<div class="trace-node-pin me" title="Бот">🛰</div>`;
+        popup = `<strong>🛰 ${escapeHtml(n.label)}</strong><br><span class="muted">это твоя нода</span>`;
+      } else if (n.role === "dest") {
+        html = `<div class="trace-node-pin dest" title="Цель">🎯</div>`;
+        popup = `<strong>🎯 ${escapeHtml(n.label)}</strong><br><span class="muted">получатель</span>`;
+      } else {
+        html = `<div class="trace-node-pin relay">${relayCounter++}</div>`;
+        popup = `<strong>${escapeHtml(n.label)}</strong><br><span class="muted">ретранслятор</span>`;
+      }
+      L.marker([lat, lng], {
+        icon: L.divIcon({ className: "trace-node-marker", html, iconSize: [32, 32], iconAnchor: [16, 16] }),
+      })
+        .bindPopup(popup)
+        .addTo(TRACEROUTE_LAYER);
+    }
+
+    // Legend
+    const legend = L.control({ position: "topright" });
+    legend.onAdd = () => {
+      const div = L.DomUtil.create("div", "trace-legend");
+      div.innerHTML = `
+        <div><span class="trace-leg-swatch red"></span> Туда (запрос)</div>
+        <div><span class="trace-leg-swatch blue"></span> Обратно (ответ)</div>
+        <div><span class="trace-leg-pin">🛰</span> Бот · <span class="trace-leg-pin">🎯</span> Цель · <span class="trace-leg-pin relay">1</span> Ретранслятор</div>
+      `;
+      return div;
+    };
+    legend.addTo(map);
+    // Remember it so we can remove on next traceroute
+    TRACEROUTE_LAYER._legendControl = legend;
+
+    // Fit to bounds
+    const pts = allNodes.map(n => [n.lat, n.lng]);
+    if (pts.length === 1) {
+      map.setView(pts[0], 14);
+    } else if (pts.length > 1) {
+      map.fitBounds(pts, { padding: [50, 50] });
+    }
+  }, 350);
+}
+
+
 
 function ensureMap() {
   if (MAP) return MAP;
@@ -439,6 +726,7 @@ async function refreshAlertsUi() {
     $("#alertsWind").value = a.wind_threshold_ms ?? 15;
     $("#alertsRain").value = a.rain_prob_threshold ?? 80;
     $("#alertsFrost").value = a.frost_threshold_c ?? -5;
+    $("#alertsHeat").value = a.heat_threshold_c ?? 30;
     $("#alertsInterval").value = a.check_interval_minutes ?? 15;
 
     const last = status.last_check_ts;
@@ -466,6 +754,7 @@ $("#alertsSave")?.addEventListener("click", async () => {
     wind_threshold_ms: parseFloat($("#alertsWind").value) || 15,
     rain_prob_threshold: parseInt($("#alertsRain").value, 10) || 80,
     frost_threshold_c: parseFloat($("#alertsFrost").value),
+    heat_threshold_c: parseFloat($("#alertsHeat").value),
     check_interval_minutes: parseInt($("#alertsInterval").value, 10) || 15,
   };
   try {
@@ -492,16 +781,15 @@ async function refreshMeshStatus() {
   const el = $("#meshStatus");
   try {
     const s = await api("/api/mesh/status");
-    const where = s.connection_type === "tcp"
-      ? `${s.tcp_host || "—"}:${s.tcp_port || 4403}`
-      : (s.resolved_path || "не найден");
     if (s.connected) {
       el.className = "status ok";
-      const online = s.nodes_online_1h ?? 0;
-      el.textContent = `📡 ${where} · узлов: ${s.nodes_known ?? 0} · онлайн: ${online}`;
+      // Backend now returns nodes_online_2h (2-hour window); fall back to
+      // legacy nodes_online_1h if the user hasn't restarted the service yet.
+      const online = s.nodes_online_2h ?? s.nodes_online_1h ?? 0;
+      el.textContent = `📡 узлов: ${s.nodes_known ?? 0} · онлайн: ${online}`;
     } else {
       el.className = "status";
-      el.textContent = `📡 ${where} · отключён`;
+      el.textContent = `📡 нет связи`;
     }
   } catch (e) {
     el.className = "status bad";
@@ -609,6 +897,166 @@ $("#testConnect").addEventListener("click", async () => {
     }
   } catch (e) { toast(e.message, "err"); }
   refreshMeshStatus();
+});
+
+$("#disconnectMesh").addEventListener("click", async () => {
+  if (!confirm("Отключить связь с Heltec? Следующая отправка/healthcheck снова поднимет соединение автоматически.")) return;
+  const btn = $("#disconnectMesh");
+  btn.disabled = true;
+  try {
+    await api("/api/mesh/disconnect", { method: "POST" });
+    toast("Связь с Heltec закрыта", "ok");
+  } catch (e) {
+    toast("Ошибка: " + e.message, "err");
+  } finally {
+    btn.disabled = false;
+  }
+  refreshMeshStatus();
+});
+
+// ---------- Heltec device settings modal ----------
+
+let HELTEC_INFO = null;
+
+async function openHeltecModal() {
+  const modal = document.getElementById("heltecModal");
+  modal.hidden = false;
+  document.getElementById("heltecLoading").hidden = false;
+  document.getElementById("heltecLoading").textContent = "Запрашиваю настройки у ноды…";
+  document.getElementById("heltecForm").hidden = true;
+  await loadHeltecInfo();
+}
+
+function closeHeltecModal() {
+  document.getElementById("heltecModal").hidden = true;
+}
+
+async function loadHeltecInfo() {
+  try {
+    const info = await api("/api/heltec/info");
+    HELTEC_INFO = info;
+    if (!info.connected) {
+      document.getElementById("heltecLoading").textContent =
+        "Нет связи с Heltec. Открой «Проверить связь» и попробуй ещё раз.";
+      return;
+    }
+    fillHeltecForm(info);
+    document.getElementById("heltecLoading").hidden = true;
+    document.getElementById("heltecForm").hidden = false;
+  } catch (e) {
+    document.getElementById("heltecLoading").textContent = "Ошибка: " + e.message;
+  }
+}
+
+function fillHeltecForm(info) {
+  const regionSel = document.getElementById("heltecRegion");
+  regionSel.innerHTML = "";
+  for (const r of info.regions || []) {
+    const opt = document.createElement("option");
+    opt.value = r.value;
+    opt.textContent = r.label;
+    if (r.value === info.region) opt.selected = true;
+    regionSel.appendChild(opt);
+  }
+
+  const roleSel = document.getElementById("heltecRole");
+  roleSel.innerHTML = "";
+  for (const r of info.roles || []) {
+    const opt = document.createElement("option");
+    opt.value = r.value;
+    opt.textContent = r.label;
+    if (r.value === info.role) opt.selected = true;
+    roleSel.appendChild(opt);
+  }
+
+  const modemSel = document.getElementById("heltecModemPreset");
+  modemSel.innerHTML = "";
+  for (const m of info.modem_presets || []) {
+    const opt = document.createElement("option");
+    opt.value = m.value;
+    opt.textContent = m.label;
+    if (m.value === info.modem_preset) opt.selected = true;
+    modemSel.appendChild(opt);
+  }
+
+  document.getElementById("heltecLongName").value = info.long_name || "";
+  document.getElementById("heltecShortName").value = info.short_name || "";
+  document.getElementById("heltecHopLimit").value = info.hop_limit ?? 3;
+  document.getElementById("heltecTxPower").value = info.tx_power ?? 0;
+  document.getElementById("heltecTxEnabled").checked = info.tx_enabled !== false;
+
+  document.getElementById("heltecFw").textContent = info.firmware_version || "—";
+  document.getElementById("heltecHw").textContent = info.hw_model || "—";
+  document.getElementById("heltecNodeId").textContent =
+    info.my_node_num != null ? `!${info.my_node_num.toString(16).padStart(8, "0")}` : "—";
+}
+
+async function saveHeltecSettings() {
+  if (!HELTEC_INFO) return;
+  const payload = {};
+  const longName  = document.getElementById("heltecLongName").value.trim();
+  const shortName = document.getElementById("heltecShortName").value.trim();
+  if (longName  !== (HELTEC_INFO.long_name  || "")) payload.long_name  = longName;
+  if (shortName !== (HELTEC_INFO.short_name || "")) payload.short_name = shortName;
+
+  const region = parseInt(document.getElementById("heltecRegion").value, 10);
+  if (region !== HELTEC_INFO.region) payload.region = region;
+
+  const role = parseInt(document.getElementById("heltecRole").value, 10);
+  if (role !== HELTEC_INFO.role) payload.role = role;
+
+  const modem = parseInt(document.getElementById("heltecModemPreset").value, 10);
+  if (modem !== HELTEC_INFO.modem_preset) payload.modem_preset = modem;
+
+  const hop = Math.max(1, Math.min(7, parseInt(document.getElementById("heltecHopLimit").value, 10) || 3));
+  if (hop !== HELTEC_INFO.hop_limit) payload.hop_limit = hop;
+
+  const txp = Math.max(0, Math.min(30, parseInt(document.getElementById("heltecTxPower").value, 10) || 0));
+  if (txp !== HELTEC_INFO.tx_power) payload.tx_power = txp;
+
+  const txEn = document.getElementById("heltecTxEnabled").checked;
+  if (txEn !== (HELTEC_INFO.tx_enabled !== false)) payload.tx_enabled = txEn;
+
+  if (Object.keys(payload).length === 0) {
+    toast("Нечего применять — ничего не изменилось");
+    return;
+  }
+
+  const btn = document.getElementById("heltecSave");
+  btn.disabled = true;
+  btn.textContent = "Применяю…";
+  try {
+    const res = await api("/api/heltec/settings", { method: "POST", body: payload });
+    toast("Применено: " + (res.applied || []).join(", "), "ok");
+    await loadHeltecInfo();
+  } catch (e) {
+    toast("Ошибка: " + e.message, "err");
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "💾 Применить";
+  }
+}
+
+async function rebootHeltec() {
+  if (!confirm("Перезагрузить ноду Heltec? Связь временно прервётся на ~30 секунд.")) return;
+  try {
+    await api("/api/heltec/reboot", { method: "POST", body: { delay: 5 } });
+    toast("Команда reboot отправлена. Через 5 секунд устройство перезагрузится.", "ok");
+    closeHeltecModal();
+  } catch (e) {
+    toast("Ошибка: " + e.message, "err");
+  }
+}
+
+document.getElementById("heltecSettingsBtn")?.addEventListener("click", openHeltecModal);
+document.getElementById("heltecRefresh")?.addEventListener("click", loadHeltecInfo);
+document.getElementById("heltecSave")?.addEventListener("click", saveHeltecSettings);
+document.getElementById("heltecReboot")?.addEventListener("click", rebootHeltec);
+document.getElementById("heltecModal")?.addEventListener("click", (e) => {
+  if (e.target.dataset.close !== undefined) closeHeltecModal();
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !document.getElementById("heltecModal").hidden) closeHeltecModal();
 });
 
 // ---------- Field/day chip helpers ----------
@@ -774,6 +1222,88 @@ let ALL_MESSAGES = [];      // full log, kept in memory for filtering
 let SELECTED_CONV = null;   // currently displayed conversation key
 let CONVS = new Map();      // convKey -> {key, title, kind, channel, peerId, lastMsg, unread, icon}
 let KNOWN_CHANNELS = [];    // [{index, name, role}] — pre-populates the sidebar even with no messages
+
+// Internal IDs of outgoing messages whose delivery status is still pending
+// (i.e. "enroute" — no ACK yet). pollChat sends these to the backend so it
+// can return up-to-date statuses without us having to re-fetch the whole log.
+const PENDING_OUT_IDS = new Set();
+// Cap how long we keep checking a single message — broadcasts never get ACK
+// so we'd keep polling forever otherwise. After 2 min, give up on a message.
+const PENDING_TTL_MS = 2 * 60 * 1000;
+const PENDING_START_TS = new Map();
+
+function trackPending(m) {
+  if (m && !m.incoming && !m.is_reaction
+      && m.delivery_status === "enroute" && m.id) {
+    PENDING_OUT_IDS.add(m.id);
+    PENDING_START_TS.set(m.id, Date.now());
+  }
+}
+function untrackPending(id) {
+  PENDING_OUT_IDS.delete(id);
+  PENDING_START_TS.delete(id);
+}
+function pruneStalePending() {
+  const now = Date.now();
+  for (const [id, ts] of PENDING_START_TS) {
+    if (now - ts > PENDING_TTL_MS) untrackPending(id);
+  }
+}
+
+// Render delivery indicator HTML for an outgoing message. Returns "" for
+// incoming, reactions, or messages without a known status.
+function deliveryIconHtml(m) {
+  if (!m || m.incoming || m.is_reaction) return "";
+  const s = m.delivery_status;
+  if (!s) return "";
+  let icon, label, cls;
+  if (s === "delivered") {
+    const hops = m.delivery_hops;
+    icon = "✓✓";
+    label = hops != null
+      ? `Доставлено · ACK через ${hops} hop${hops === 1 ? "" : "s"}`
+      : "Доставлено · ACK получен";
+    cls = "delivered";
+  } else if (s === "error") {
+    icon = "⚠";
+    label = "Ошибка доставки";
+    cls = "error";
+  } else if (s === "enroute") {
+    icon = "☁";
+    label = "Отправлено в эфир, ждём ACK";
+    cls = "enroute";
+  } else if (s === "queued") {
+    icon = "⏳";
+    label = "В очереди";
+    cls = "queued";
+  } else {
+    return "";
+  }
+  return `<span class="msg-status ${cls}" title="${label}">${icon}</span>`;
+}
+
+// Re-render the delivery indicator of a single visible message bubble.
+function updateMessageStatusInDom(m) {
+  if (!m || m.incoming || m.is_reaction) return;
+  const log = $("#chatLog");
+  if (!log) return;
+  const bubble = m.msg_id
+    ? log.querySelector(`[data-mesh-id="${m.msg_id}"]`)
+    : log.querySelector(`[data-row-id="${m.id}"]`);
+  if (!bubble) return;
+  const meta = bubble.querySelector(".meta");
+  if (!meta) return;
+  // Remove existing status node if any
+  meta.querySelector(".msg-status")?.remove();
+  // Insert fresh one right before the action buttons (or at the end of meta)
+  const html = deliveryIconHtml(m);
+  if (!html) return;
+  const tmp = document.createElement("template");
+  tmp.innerHTML = html.trim();
+  const node = tmp.content.firstChild;
+  const insertBefore = meta.querySelector(".reply-btn") || null;
+  meta.insertBefore(node, insertBefore);
+}
 
 const BROADCAST_TO = new Set(["^all", "all", "", null, undefined]);
 
@@ -943,6 +1473,7 @@ function _buildMessageElement(m, byMsgId, elements) {
     div.dataset.meshId = String(m.msg_id);
     elements.set(String(m.msg_id), div);
   }
+  if (m.id) div.dataset.rowId = String(m.id);
 
   // Build reply quote from the in-memory parent (no DOM lookup at all).
   let replyHtml = "";
@@ -960,6 +1491,7 @@ function _buildMessageElement(m, byMsgId, elements) {
   }
 
   const t = new Date(m.time * 1000).toLocaleTimeString();
+  const status = deliveryIconHtml(m);
   const actions = m.msg_id
     ? `<button class="reply-btn" title="Ответить" data-msg-id="${m.msg_id}">↩</button>` +
       `<button class="react-btn" title="Поставить реакцию" data-msg-id="${m.msg_id}">+</button>`
@@ -970,6 +1502,7 @@ function _buildMessageElement(m, byMsgId, elements) {
       `<span class="from">${escapeHtml(m.from_name || "?")}</span>` +
       `<span class="ch">ch${m.channel ?? 0}</span>` +
       `<span>${t}</span>` +
+      status +
       actions +
     `</div>` +
     replyHtml +
@@ -1115,7 +1648,9 @@ function appendChatMessage(m) {
   const div = document.createElement("div");
   div.className = "chat-msg" + (m.incoming ? "" : " outgoing");
   if (m.msg_id) div.dataset.meshId = m.msg_id;
+  if (m.id) div.dataset.rowId = String(m.id);
   const t = new Date(m.time * 1000).toLocaleTimeString();
+  const status = deliveryIconHtml(m);
   // Action buttons: reply + reaction. Both need a real mesh msg_id to target.
   const actions = m.msg_id
     ? `<button class="reply-btn" title="Ответить" data-msg-id="${m.msg_id}">↩</button>` +
@@ -1126,6 +1661,7 @@ function appendChatMessage(m) {
       `<span class="from">${escapeHtml(m.from_name || "?")}</span>` +
       `<span class="ch">ch${m.channel ?? 0}</span>` +
       `<span>${t}</span>` +
+      status +
       actions +
     `</div>` +
     buildReplyQuote(m, log) +
@@ -1146,12 +1682,38 @@ function appendChatMessage(m) {
 
 async function pollChat() {
   try {
-    const data = await api(`/api/chat/messages?since=${LAST_MSG_ID}`);
+    pruneStalePending();
+    const params = new URLSearchParams({ since: String(LAST_MSG_ID) });
+    if (PENDING_OUT_IDS.size) {
+      params.set("status_for", Array.from(PENDING_OUT_IDS).join(","));
+    }
+    const data = await api(`/api/chat/messages?${params.toString()}`);
+
+    // Apply delivery status updates to existing messages (and DOM)
+    if (Array.isArray(data.status_updates) && data.status_updates.length) {
+      for (const u of data.status_updates) {
+        const i = ALL_MESSAGES.findIndex(x => x.id === u.id);
+        if (i < 0) continue;
+        const m = ALL_MESSAGES[i];
+        const wasStatus = m.delivery_status;
+        m.delivery_status = u.delivery_status;
+        m.delivery_hops  = u.delivery_hops;
+        // Stop tracking if the new status is terminal
+        if (m.delivery_status !== "enroute" && m.delivery_status !== "queued") {
+          untrackPending(m.id);
+        }
+        if (wasStatus !== m.delivery_status) {
+          updateMessageStatusInDom(m);
+        }
+      }
+    }
+
     if (!data.messages?.length) return;
     const firstPoll = LAST_MSG_ID === 0;
     let shouldRerender = false;
     for (const m of data.messages) {
       ALL_MESSAGES.push(m);
+      trackPending(m);
       if (m.id > LAST_MSG_ID) LAST_MSG_ID = m.id;
       const convKey = conversationKey(m);
       // If the message belongs to the currently-open conversation, append to DOM

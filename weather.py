@@ -13,6 +13,8 @@ log = logging.getLogger(__name__)
 
 GEOCODE_URL = "https://geocoding-api.open-meteo.com/v1/search"
 FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
+MARINE_URL = "https://marine-api.open-meteo.com/v1/marine"
+AIR_QUALITY_URL = "https://air-quality-api.open-meteo.com/v1/air-quality"
 
 # WMO weather codes split into (label, emoji) so emoji can be turned off.
 WMO_CODES_RU: dict[int, tuple[str, str]] = {
@@ -149,6 +151,189 @@ def fetch_weather(latitude: float, longitude: float, timezone: str = "auto") -> 
     return r.json()
 
 
+def fetch_water_temperature(
+    latitude: float, longitude: float, timezone: str = "auto"
+) -> dict[str, Any] | None:
+    """Best-effort water-surface temperature.
+
+    1) Try Open-Meteo **Marine API** — accurate, works only for sea/ocean coords.
+    2) Fall back to a **seasonal estimate** from the 7-day mean air temperature
+       (rivers / lakes in temperate climate roughly follow the running air-temp
+       average with a seasonal offset).
+
+    Returns dict { "value": float_C, "source": "marine" | "estimated" } or None
+    if even the air-temp history is unavailable.
+    """
+    # --- 1) Try the marine grid first
+    try:
+        r = requests.get(
+            MARINE_URL,
+            params={
+                "latitude": latitude,
+                "longitude": longitude,
+                "timezone": timezone or "auto",
+                "current": "sea_surface_temperature",
+            },
+            timeout=10,
+        )
+        r.raise_for_status()
+        data = r.json()
+        t = (data.get("current") or {}).get("sea_surface_temperature")
+        if t is not None:
+            return {"value": float(t), "source": "marine"}
+    except Exception as exc:
+        log.info("Marine API has no data here (likely inland): %s", exc)
+
+    # --- 2) Fallback: estimate from 7-day mean air temperature
+    try:
+        r = requests.get(
+            FORECAST_URL,
+            params={
+                "latitude": latitude,
+                "longitude": longitude,
+                "timezone": timezone or "auto",
+                "past_days": 7,
+                "forecast_days": 1,
+                "hourly": "temperature_2m",
+            },
+            timeout=12,
+        )
+        r.raise_for_status()
+        hourly = (r.json().get("hourly") or {}).get("temperature_2m") or []
+        temps = [float(t) for t in hourly if t is not None]
+        if not temps:
+            return None
+        mean_air = sum(temps) / len(temps)
+    except Exception:
+        log.exception("Fallback water-temp estimate failed")
+        return None
+
+    # Seasonal offset: water lags air by ~1-3 weeks.
+    # In summer water is a few °C colder than the running air mean; in autumn
+    # it stays warmer; in winter it bottoms out near 0-2°C (under ice cover);
+    # in spring it warms slowly. Numbers below are empirical rules of thumb
+    # for mid-latitudes (Russia/EU temperate zone).
+    import datetime as _dt
+    month = _dt.date.today().month
+    if month in (12, 1, 2):                # winter — ice / freezing
+        water = max(0.5, mean_air * 0.2 + 1.5)
+    elif month in (3, 4, 5):               # spring — water still cold
+        water = mean_air - 4.0
+    elif month in (6, 7, 8):               # summer — water a bit cooler
+        water = mean_air - 2.0
+    else:                                   # autumn — water still warm
+        water = mean_air + 1.5
+
+    # Clip to plausible inland range
+    water = max(0.0, min(water, 32.0))
+    return {"value": round(water, 1), "source": "estimated"}
+
+
+def fetch_air_quality(
+    latitude: float, longitude: float, timezone: str = "auto"
+) -> dict[str, Any] | None:
+    """Pull European AQI, PM2.5, PM10, ozone and UV index from Open-Meteo Air
+    Quality API. Returns a dict with whatever fields the response had, or None.
+    """
+    try:
+        r = requests.get(
+            AIR_QUALITY_URL,
+            params={
+                "latitude": latitude,
+                "longitude": longitude,
+                "timezone": timezone or "auto",
+                "current": "european_aqi,pm10,pm2_5,ozone,uv_index",
+            },
+            timeout=12,
+        )
+        r.raise_for_status()
+        cur = (r.json().get("current") or {})
+    except Exception:
+        log.exception("Air quality fetch failed")
+        return None
+
+    def _f(k):
+        v = cur.get(k)
+        try:
+            return float(v) if v is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    out = {
+        "aqi": _f("european_aqi"),
+        "pm2_5": _f("pm2_5"),
+        "pm10": _f("pm10"),
+        "ozone": _f("ozone"),
+        "uv_index": _f("uv_index"),
+    }
+    # If everything's None, treat as no data.
+    if all(v is None for v in out.values()):
+        return None
+    return out
+
+
+def fetch_yesterday(
+    latitude: float, longitude: float, timezone: str = "auto"
+) -> dict[str, Any] | None:
+    """Pull yesterday's daily min/max/weather_code for the "vs yesterday" diff."""
+    try:
+        r = requests.get(
+            FORECAST_URL,
+            params={
+                "latitude": latitude,
+                "longitude": longitude,
+                "timezone": timezone or "auto",
+                "past_days": 1,
+                "forecast_days": 0,
+                "daily": "temperature_2m_min,temperature_2m_max,weather_code,precipitation_sum",
+            },
+            timeout=12,
+        )
+        r.raise_for_status()
+        d = r.json().get("daily") or {}
+    except Exception:
+        log.exception("Yesterday fetch failed")
+        return None
+
+    def _first(arr_key, cast=float):
+        arr = d.get(arr_key) or []
+        if not arr or arr[0] is None:
+            return None
+        try:
+            return cast(arr[0])
+        except (TypeError, ValueError):
+            return None
+
+    return {
+        "tmin": _first("temperature_2m_min"),
+        "tmax": _first("temperature_2m_max"),
+        "code": _first("weather_code", int),
+        "precip": _first("precipitation_sum"),
+    }
+
+
+def aqi_label(aqi: float | None) -> str:
+    """European AQI → human label. https://www.eea.europa.eu/themes/air/air-quality-index"""
+    if aqi is None:
+        return ""
+    if aqi <= 20:  return "отлично"
+    if aqi <= 40:  return "хорошо"
+    if aqi <= 60:  return "средне"
+    if aqi <= 80:  return "плохо"
+    if aqi <= 100: return "очень плохо"
+    return "крайне плохо"
+
+
+def uv_label(uv: float | None) -> str:
+    if uv is None:
+        return ""
+    if uv < 3:  return "низкий"
+    if uv < 6:  return "средний"
+    if uv < 8:  return "высокий"
+    if uv < 11: return "очень высокий"
+    return "экстремальный"
+
+
 def hpa_to_mmhg(hpa: float | None) -> float | None:
     if hpa is None:
         return None
@@ -219,6 +404,56 @@ def format_message(
         a = cur.get("apparent_temperature")
         if a is not None:
             lines.append(f"{emoji('🤔')}Ощущается как {a:+.1f}°C")
+
+    if "vs_yesterday" in fields:
+        # Injected by app.build_message as weather["_yesterday"] dict.
+        y = weather.get("_yesterday")
+        try:
+            today_tmax = (daily.get("temperature_2m_max") or [None])[0]
+            today_tmax = float(today_tmax) if today_tmax is not None else None
+        except (TypeError, ValueError, IndexError):
+            today_tmax = None
+        if y and y.get("tmax") is not None and today_tmax is not None:
+            diff = today_tmax - float(y["tmax"])
+            if abs(diff) < 1.0:
+                lines.append(f"{emoji('📊')}как вчера")
+            else:
+                word = "теплее" if diff > 0 else "холоднее"
+                lines.append(f"{emoji('📈' if diff > 0 else '📉')}на {abs(diff):.0f}°C {word}, чем вчера")
+
+    if "air_quality" in fields:
+        aq = weather.get("_air_quality")
+        if aq:
+            parts: list[str] = []
+            if aq.get("aqi") is not None:
+                lbl = aqi_label(aq["aqi"])
+                parts.append(f"AQI {int(aq['aqi'])}" + (f" ({lbl})" if lbl else ""))
+            if aq.get("pm2_5") is not None:
+                parts.append(f"PM2.5 {aq['pm2_5']:.0f}")
+            if aq.get("pm10") is not None:
+                parts.append(f"PM10 {aq['pm10']:.0f}")
+            if parts:
+                lines.append(f"{emoji('🌫')}воздух: " + ", ".join(parts))
+
+    if "uv_index" in fields:
+        aq = weather.get("_air_quality")
+        uv = aq.get("uv_index") if aq else None
+        if uv is not None:
+            lbl = uv_label(uv)
+            lines.append(f"{emoji('☀️')}УФ {uv:.0f}" + (f" ({lbl})" if lbl else ""))
+
+    if "water_temp" in fields:
+        # Injected by app.build_message via fetch_water_temperature.
+        # Now a dict {"value", "source"} — "marine" is real, "estimated" is
+        # derived from 7-day air-temp mean for inland rivers/lakes.
+        wt = weather.get("_water_temp")
+        if isinstance(wt, dict) and wt.get("value") is not None:
+            v = float(wt["value"])
+            prefix = "≈ " if wt.get("source") == "estimated" else ""
+            lines.append(f"{emoji('🌊')}Вода {prefix}{v:+.1f}°C")
+        elif isinstance(wt, (int, float)):
+            # Backwards-compat in case old code path still returns a plain number
+            lines.append(f"{emoji('🌊')}Вода {float(wt):+.1f}°C")
 
     # Backward compat: humidity_pressure / wind_precip used to be combined fields.
     has_humidity = "humidity" in fields or "humidity_pressure" in fields
@@ -340,10 +575,14 @@ def format_message(
 ALL_FIELDS = [
     {"key": "temp",                       "label": "Температура + состояние"},
     {"key": "feels",                      "label": "Температура по ощущению"},
+    {"key": "vs_yesterday",               "label": "Сравнение со вчера 📊"},
+    {"key": "water_temp",                 "label": "Температура воды 🌊"},
     {"key": "humidity",                   "label": "Влажность"},
     {"key": "pressure",                   "label": "Давление"},
     {"key": "wind",                       "label": "Ветер"},
     {"key": "precipitation",              "label": "Осадки"},
+    {"key": "air_quality",                "label": "Качество воздуха 🌫"},
+    {"key": "uv_index",                   "label": "УФ-индекс ☀️"},
     {"key": "forecast",                   "label": "Прогноз на сегодня"},
     {"key": "tomorrow_morning_evening",   "label": "Завтра: утро и вечер"},
 ]

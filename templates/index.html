@@ -4,13 +4,34 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Weather → Heltec Mesh Bridge</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap">
   <link rel="stylesheet" href="/static/style.css">
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="anonymous" />
   <script defer src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin="anonymous"></script>
 </head>
 <body>
   <header class="topbar">
-    <h1>🌍 Weather → Mesh</h1>
+    <h1>
+      <svg class="brand-icon" viewBox="0 0 24 24" aria-hidden="true">
+        <defs>
+          <linearGradient id="brandGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+            <stop offset="0%"   stop-color="#8b9eff"/>
+            <stop offset="55%"  stop-color="#d77bff"/>
+            <stop offset="100%" stop-color="#4dd0e1"/>
+          </linearGradient>
+        </defs>
+        <!-- расходящиеся радиоволны -->
+        <path d="M3.5 12 Q12 1.5 20.5 12"     fill="none" stroke="url(#brandGrad)" stroke-width="1.7" stroke-linecap="round" opacity="0.45"/>
+        <path d="M5.8 13.4 Q12 6 18.2 13.4"   fill="none" stroke="url(#brandGrad)" stroke-width="1.8" stroke-linecap="round" opacity="0.72"/>
+        <path d="M8.4 14.9 Q12 10.6 15.6 14.9" fill="none" stroke="url(#brandGrad)" stroke-width="2"   stroke-linecap="round"/>
+        <!-- "планета" / точка-узел -->
+        <circle cx="12" cy="18" r="2.7" fill="url(#brandGrad)"/>
+        <circle cx="12" cy="18" r="1.1" fill="rgba(255,255,255,0.85)"/>
+      </svg>
+      <span class="brand-text">Weather → Mesh</span>
+    </h1>
     <div class="status" id="meshStatus">…</div>
   </header>
 
@@ -185,6 +206,8 @@
         <div class="row">
           <button id="saveMesh">Сохранить</button>
           <button id="testConnect" class="ghost">Проверить связь</button>
+          <button id="disconnectMesh" class="danger-action">⛔ Отключить</button>
+          <button id="heltecSettingsBtn" class="primary">⚙️ Настройки Heltec</button>
         </div>
       </section>
 
@@ -213,6 +236,9 @@
           </label>
           <label>Заморозки до, °C
             <input type="number" id="alertsFrost" min="-30" max="5" step="1">
+          </label>
+          <label>Жара от, °C
+            <input type="number" id="alertsHeat" min="20" max="50" step="1">
           </label>
           <label>Интервал проверки, мин
             <input type="number" id="alertsInterval" min="2" max="120" step="1">
@@ -321,6 +347,74 @@
 
   <div id="toast" class="toast"></div>
 
+  <!-- Heltec settings modal -->
+  <div id="heltecModal" class="modal" hidden>
+    <div class="modal-backdrop" data-close></div>
+    <div class="modal-content card">
+      <div class="modal-head">
+        <h3>⚙️ Настройки Heltec V4</h3>
+        <button class="modal-close ghost" data-close title="Закрыть">✕</button>
+      </div>
+      <div class="modal-body" id="heltecBody">
+        <div class="muted" id="heltecLoading">Запрашиваю настройки у ноды…</div>
+
+        <div id="heltecForm" hidden>
+          <div class="profile-section">Идентификация</div>
+          <label>Длинное имя <small>(до 39 символов)</small>
+            <input type="text" id="heltecLongName" maxlength="39" placeholder="My Heltec Node">
+          </label>
+          <label>Короткое имя <small>(ровно 4 символа, видно в эфире)</small>
+            <input type="text" id="heltecShortName" maxlength="4" placeholder="ABCD">
+          </label>
+
+          <div class="profile-section">Радио (LoRa)</div>
+          <label>Регион <small>(частотный диапазон LoRa)</small>
+            <select id="heltecRegion"></select>
+          </label>
+          <label>Модем-пресет <small>(скорость ↔ дальность)</small>
+            <select id="heltecModemPreset"></select>
+          </label>
+          <div class="grid2">
+            <label>Hop Limit <small>(1–7, число ретрансляций)</small>
+              <input type="number" id="heltecHopLimit" min="1" max="7" step="1" value="3">
+            </label>
+            <label>TX Power, dBm <small>(0 = по умолчанию)</small>
+              <input type="number" id="heltecTxPower" min="0" max="30" step="1" value="0">
+            </label>
+          </div>
+          <label class="toggle-row">
+            <input type="checkbox" id="heltecTxEnabled">
+            <span>Передатчик включён (TX enabled)</span>
+          </label>
+
+          <div class="profile-section">Роль в сети</div>
+          <label>Роль ноды
+            <select id="heltecRole"></select>
+          </label>
+
+          <div class="profile-section">Информация</div>
+          <div class="profile-row">
+            <div class="profile-label">Прошивка</div>
+            <div class="profile-value" id="heltecFw">—</div>
+          </div>
+          <div class="profile-row">
+            <div class="profile-label">HW model</div>
+            <div class="profile-value" id="heltecHw">—</div>
+          </div>
+          <div class="profile-row">
+            <div class="profile-label">Node ID</div>
+            <div class="profile-value" id="heltecNodeId">—</div>
+          </div>
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button id="heltecRefresh" class="ghost">↻ Обновить</button>
+        <button id="heltecReboot" class="ghost danger-action">⟳ Перезагрузить ноду</button>
+        <button id="heltecSave" class="primary">💾 Применить</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Node profile modal -->
   <div id="nodeProfile" class="modal" hidden>
     <div class="modal-backdrop" data-close></div>
@@ -330,8 +424,10 @@
         <button class="modal-close ghost" data-close title="Закрыть">✕</button>
       </div>
       <div class="modal-body" id="profileBody"></div>
+      <div id="tracerouteResult" class="traceroute-result" hidden></div>
       <div class="modal-actions">
         <button id="profileDm" class="primary">💬 Написать DM</button>
+        <button id="profileTrace">🛰 Traceroute</button>
         <button id="profileMap">🗺 Показать на карте</button>
       </div>
     </div>

@@ -25,6 +25,7 @@ DEFAULTS = {
     "wind_threshold_ms": 15,        # порывы > 15 м/с считаются опасными
     "rain_prob_threshold": 80,      # вероятность осадков ≥ 80%
     "frost_threshold_c": -5,        # ночные заморозки до −5 и ниже
+    "heat_threshold_c": 30,         # дневная жара от +30 и выше
     "thunderstorm_alerts": True,    # текущая гроза
     "check_interval_minutes": 15,
 }
@@ -174,6 +175,19 @@ def check(cfg: dict[str, Any], bridge: Any, state: AlertsState) -> list[dict[str
         to_send.append((
             "frost",
             f"⚠️ Заморозки{' в ' + city if city else ''}: минимум {tmin:+.0f}°C.",
+        ))
+
+    # Жара (high temperature)
+    try:
+        tmax = (daily.get("temperature_2m_max") or [None])[0]
+        tmax = float(tmax) if tmax is not None else None
+    except (TypeError, ValueError, IndexError):
+        tmax = None
+    heat_threshold = float(alerts_cfg.get("heat_threshold_c", 30))
+    if tmax is not None and tmax >= heat_threshold and not state.already_sent("heat", today):
+        to_send.append((
+            "heat",
+            f"🔥 Жара{' в ' + city if city else ''}: до +{tmax:.0f}°C. Пейте воду, прячьтесь в тень.",
         ))
 
     if not to_send:

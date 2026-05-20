@@ -351,6 +351,20 @@ def build_message(cfg: dict[str, Any], fields: list[str]) -> str:
     if loc.get("latitude") is None or loc.get("longitude") is None:
         raise RuntimeError("Город не выбран. Открой UI и выбери город.")
     data = weather.fetch_weather(loc["latitude"], loc["longitude"], loc.get("timezone") or "auto")
+    f = set(fields or [])
+    # Separate endpoints — fetch only when the corresponding field is selected.
+    if "water_temp" in f:
+        data["_water_temp"] = weather.fetch_water_temperature(
+            loc["latitude"], loc["longitude"], loc.get("timezone") or "auto"
+        )
+    if "air_quality" in f or "uv_index" in f:
+        data["_air_quality"] = weather.fetch_air_quality(
+            loc["latitude"], loc["longitude"], loc.get("timezone") or "auto"
+        )
+    if "vs_yesterday" in f:
+        data["_yesterday"] = weather.fetch_yesterday(
+            loc["latitude"], loc["longitude"], loc.get("timezone") or "auto"
+        )
     msg_cfg = cfg.get("message", {}) or {}
     return weather.format_message(
         data,
@@ -549,14 +563,58 @@ def api_mesh_connect():
     return jsonify(BRIDGE.connect())
 
 
+@app.route("/api/mesh/disconnect", methods=["POST"])
+def api_mesh_disconnect():
+    """Force-close the current Heltec connection.
+
+    The next outbound action (manual send, scheduled slot, healthcheck) will
+    automatically re-open it — this button is mostly useful for forcing a
+    reconnect, freeing a stuck serial/TCP socket, or cleanly stepping aside
+    so you can flash the Heltec from another tool.
+    """
+    try:
+        BRIDGE.close()
+    except Exception as exc:
+        log.exception("Manual disconnect failed")
+        return jsonify({"error": str(exc)}), 500
+    return jsonify({"ok": True, "connected": False})
+
+
 @app.route("/api/chat/messages", methods=["GET"])
 def api_chat_messages():
-    """Return chat messages newer than ?since=<id>."""
+    """Return chat messages newer than ?since=<id> plus delivery-status
+    updates for any pending outgoing messages the client passes via
+    ?status_for=<id>,<id>,...
+    """
     try:
         since = int(request.args.get("since", "0"))
     except ValueError:
         since = 0
-    return jsonify({"messages": BRIDGE.get_messages(since)})
+    messages = BRIDGE.get_messages(since)
+
+    status_updates: list[dict[str, Any]] = []
+    raw = (request.args.get("status_for") or "").strip()
+    if raw:
+        try:
+            ids = [int(x) for x in raw.split(",") if x.strip().isdigit()]
+        except Exception:
+            ids = []
+        if ids:
+            try:
+                rows = CHAT_DB.get_by_ids(ids)
+                status_updates = [
+                    {
+                        "id": r["id"],
+                        "msg_id": r.get("msg_id"),
+                        "delivery_status": r.get("delivery_status"),
+                        "delivery_hops": r.get("delivery_hops"),
+                    }
+                    for r in rows
+                ]
+            except Exception:
+                log.exception("status_for lookup failed")
+
+    return jsonify({"messages": messages, "status_updates": status_updates})
 
 
 @app.route("/api/chat/reply", methods=["POST"])
@@ -677,6 +735,78 @@ def api_nodes():
 def api_channels():
     """List channels configured on the connected Heltec — for chat sidebar."""
     return jsonify(BRIDGE.get_known_channels())
+
+
+@app.route("/api/mesh/traceroute", methods=["POST"])
+def api_mesh_traceroute():
+    """Send a traceroute request to a node and return the discovered path.
+
+    payload: { destination: "!a1b2c3d4", hop_limit?: int, timeout?: int }
+    """
+    payload = request.get_json(force=True, silent=True) or {}
+    dest = (payload.get("destination") or "").strip()
+    if not dest:
+        return jsonify({"error": "Не указан адресат"}), 400
+    try:
+        hop_limit = int(payload.get("hop_limit") or 5)
+        timeout = float(payload.get("timeout") or 30)
+    except (TypeError, ValueError):
+        hop_limit, timeout = 5, 30.0
+    cfg = load_config()
+    mesh_cfg = cfg.get("mesh", {}) or {}
+    try:
+        result = BRIDGE.traceroute(
+            dest,
+            hop_limit=hop_limit,
+            channel_index=int(mesh_cfg.get("channel_index", 0)),
+            timeout=timeout,
+        )
+    except Exception as exc:
+        log.exception("Traceroute crashed")
+        return jsonify({"error": str(exc)}), 500
+    return jsonify(result)
+
+
+@app.route("/api/heltec/info", methods=["GET"])
+def api_heltec_info():
+    """Current Heltec settings (name, region, role, hop limit, modem preset)."""
+    try:
+        return jsonify(BRIDGE.get_device_info())
+    except Exception as exc:
+        log.exception("Failed to read Heltec info")
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/api/heltec/settings", methods=["POST"])
+def api_heltec_settings():
+    """Apply a partial update to Heltec settings.
+
+    payload: any subset of { long_name, short_name, region, role, hop_limit,
+                             modem_preset, tx_enabled, tx_power }
+    """
+    payload = request.get_json(force=True, silent=True) or {}
+    try:
+        result = BRIDGE.set_device_settings(payload)
+    except Exception as exc:
+        log.exception("Heltec settings update failed")
+        return jsonify({"error": str(exc)}), 500
+    return jsonify(result)
+
+
+@app.route("/api/heltec/reboot", methods=["POST"])
+def api_heltec_reboot():
+    """Tell the Heltec to reboot."""
+    payload = request.get_json(force=True, silent=True) or {}
+    try:
+        delay = int(payload.get("delay", 5))
+    except (TypeError, ValueError):
+        delay = 5
+    try:
+        result = BRIDGE.reboot_device(delay_seconds=delay)
+    except Exception as exc:
+        log.exception("Heltec reboot failed")
+        return jsonify({"error": str(exc)}), 500
+    return jsonify(result)
 
 
 @app.route("/api/scheduler/jobs", methods=["GET"])
