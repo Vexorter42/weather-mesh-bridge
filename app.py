@@ -25,6 +25,7 @@ import weather
 import weather_alerts
 from chat_db import ChatDb
 from meshbridge import MeshBridge
+from telegram_bridge import DEFAULTS as TG_DEFAULTS, TELETHON_AVAILABLE, TelegramBridge
 
 logging.basicConfig(
     level=logging.INFO,
@@ -94,6 +95,7 @@ def load_config() -> dict[str, Any]:
             "commands": {"enabled": True},
             "alerts": dict(weather_alerts.DEFAULTS),
             "schedules": [],
+            "telegram": dict(TG_DEFAULTS),
         }
     with CONFIG_PATH.open("r", encoding="utf-8") as f:
         cfg = json.load(f)
@@ -143,6 +145,36 @@ BRIDGE.set_command_handler(_handle_mesh_command)
 # Persistent state for weather-alerts dedup, plus background worker.
 ALERTS_STATE = weather_alerts.AlertsState(BASE_DIR / "alerts_state.json")
 weather_alerts.start_background_worker(load_config, BRIDGE, ALERTS_STATE)
+
+
+def _telegram_forward(text: str, channel_index: int, destination: str) -> None:
+    """Mesh-send callback handed to TelegramBridge. Lives in app.py so it can
+    re-use the configured chunk delay and mesh settings."""
+    cfg = load_config()
+    mesh_cfg = cfg.get("mesh", {}) or {}
+    BRIDGE.configure(mesh_cfg)
+    BRIDGE.send_text_chunked(
+        text,
+        channel_index=int(channel_index if channel_index is not None else mesh_cfg.get("channel_index", 0)),
+        destination=destination or mesh_cfg.get("destination") or "broadcast",
+        chunk_delay=_chunk_delay(mesh_cfg),
+    )
+
+
+TELEGRAM_BRIDGE = TelegramBridge(
+    session_path=BASE_DIR / "telegram.session",
+    mesh_send_callback=_telegram_forward,
+)
+# Apply the persisted config now; auto-start if it's enabled and authorised.
+_tg_cfg_init = CONFIG.get("telegram") or {}
+TELEGRAM_BRIDGE.configure(_tg_cfg_init)
+if _tg_cfg_init.get("enabled") and TELETHON_AVAILABLE:
+    try:
+        r = TELEGRAM_BRIDGE.start()
+        if not r.get("ok"):
+            log.warning("Telegram bridge auto-start skipped: %s", r.get("error"))
+    except Exception:
+        log.exception("Telegram bridge auto-start crashed")
 
 
 def _mesh_healthcheck():
@@ -435,8 +467,13 @@ def api_set_config():
             cfg["commands"] = {**cfg.get("commands", {}), **payload["commands"]}
         if "alerts" in payload:
             cfg["alerts"] = {**weather_alerts.DEFAULTS, **(cfg.get("alerts") or {}), **payload["alerts"]}
+        if "telegram" in payload:
+            cfg["telegram"] = {**TG_DEFAULTS, **(cfg.get("telegram") or {}), **payload["telegram"]}
         save_config(cfg)
     BRIDGE.configure(cfg.get("mesh", {}) or {})
+    # Push the freshest telegram config into the bridge. Reconfigure will
+    # restart the worker if it's currently running.
+    TELEGRAM_BRIDGE.configure(cfg.get("telegram") or {})
     reschedule_all()
     return jsonify(cfg)
 
@@ -807,6 +844,64 @@ def api_heltec_reboot():
         log.exception("Heltec reboot failed")
         return jsonify({"error": str(exc)}), 500
     return jsonify(result)
+
+
+@app.route("/api/telegram/status", methods=["GET"])
+def api_telegram_status():
+    """Current state of the Telegram bridge + recent matches."""
+    return jsonify(TELEGRAM_BRIDGE.status())
+
+
+@app.route("/api/telegram/start", methods=["POST"])
+def api_telegram_start():
+    """Start the Telegram listening worker (also flips telegram.enabled=true)."""
+    with _cfg_lock:
+        cfg = load_config()
+        cfg.setdefault("telegram", dict(TG_DEFAULTS))["enabled"] = True
+        save_config(cfg)
+    TELEGRAM_BRIDGE.configure(cfg.get("telegram") or {})
+    result = TELEGRAM_BRIDGE.start()
+    code = 200 if result.get("ok") else 400
+    return jsonify(result), code
+
+
+@app.route("/api/telegram/stop", methods=["POST"])
+def api_telegram_stop():
+    """Stop the worker (also flips telegram.enabled=false)."""
+    with _cfg_lock:
+        cfg = load_config()
+        cfg.setdefault("telegram", dict(TG_DEFAULTS))["enabled"] = False
+        save_config(cfg)
+    result = TELEGRAM_BRIDGE.stop()
+    return jsonify(result)
+
+
+@app.route("/api/telegram/test", methods=["POST"])
+def api_telegram_test():
+    """Fetch one t.me preview page via the configured proxy to verify the
+    bridge can reach Telegram. Doesn't change persistent state."""
+    payload = request.get_json(force=True, silent=True) or {}
+    channel = (payload.get("channel") or "durov").strip()
+    try:
+        return jsonify(TELEGRAM_BRIDGE.test_fetch(channel))
+    except Exception as exc:
+        log.exception("Telegram test_fetch crashed")
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+
+@app.route("/api/telegram/test_send", methods=["POST"])
+def api_telegram_test_send():
+    """Send a TEST mesh-message using the bridge's destination/channel/prefix
+    settings — full end-to-end pipeline check without waiting for a real
+    Telegram event. Body: {text?: "..."} — optional custom text.
+    """
+    payload = request.get_json(force=True, silent=True) or {}
+    text = payload.get("text")
+    try:
+        return jsonify(TELEGRAM_BRIDGE.test_send(text))
+    except Exception as exc:
+        log.exception("Telegram test_send crashed")
+        return jsonify({"ok": False, "error": str(exc)}), 500
 
 
 @app.route("/api/scheduler/jobs", methods=["GET"])

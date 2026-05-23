@@ -5,3 +5,11 @@ meshtastic>=2.3.0
 pypubsub>=4.0.3
 pyserial>=3.5
 cryptography>=42.0.0
+# SOCKS5 / HTTP proxy support for the Telegram bridge (and anything else that
+# wants `requests.get(..., proxies={"https": "socks5://..."})`).
+PySocks>=1.7.1
+
+# Optional — only needed for the "С API" / Telethon mode of the Telegram bridge
+# (Прочее → Telegram-мост → режим с api_id). The default "Без API" / web-scrape
+# mode works without it. Uncomment if you want MTProto support:
+# telethon>=1.34.0

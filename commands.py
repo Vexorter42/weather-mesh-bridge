@@ -187,7 +187,11 @@ def cmd_today(args, msg, bridge, cfg):
     )
 
 
-@command("nodes", "узлы", help_text="/nodes — список слышимых узлов mesh-сети")
+# Окно «онлайн» — то же, что в дашборде (см. meshbridge.MeshBridge.status).
+NODES_ONLINE_WINDOW_SEC = 7200   # 2 часа
+
+
+@command("nodes", "узлы", help_text="/nodes — узлы онлайн (за последние 2ч)")
 def cmd_nodes(args, msg, bridge, cfg):
     status = bridge.status() if bridge else {}
     if not status.get("connected"):
@@ -196,32 +200,50 @@ def cmd_nodes(args, msg, bridge, cfg):
     nodes = getattr(iface, "nodes", None) or {}
     if not nodes:
         return "Узлы пока не известны — нода только что подключилась."
-    rows: list[tuple[str, Optional[int]]] = []
+
+    my_num = status.get("my_node_num")
+    now = int(time.time())
+
+    online: list[tuple[str, int]] = []  # (name, last_heard_ts)
+    total_known = 0
     for k, n in nodes.items():
         if not isinstance(n, dict):
             continue
+        total_known += 1
+        # Сам бот в списке не нужен — он по определению «онлайн».
+        if my_num is not None and n.get("num") == my_num:
+            continue
+        try:
+            last_heard = int(n.get("lastHeard") or 0)
+        except (TypeError, ValueError):
+            last_heard = 0
+        if not last_heard or (now - last_heard) > NODES_ONLINE_WINDOW_SEC:
+            continue
         user = n.get("user") or {}
         name = user.get("longName") or user.get("shortName") or str(k)
-        last_heard = n.get("lastHeard")
-        try:
-            last_heard = int(last_heard) if last_heard else None
-        except (TypeError, ValueError):
-            last_heard = None
-        rows.append((name, last_heard))
-    rows.sort(key=lambda r: (r[1] or 0), reverse=True)
-    rows = rows[:8]  # ограничим, чтоб уместилось в один пакет
-    now = int(time.time())
-    out_lines = [f"Узлы ({len(rows)} из {len(nodes)}):"]
-    for name, last in rows:
-        if last:
-            age = now - last
-            if age < 60: age_str = f"{age}с"
-            elif age < 3600: age_str = f"{age // 60}м"
-            elif age < 86400: age_str = f"{age // 3600}ч"
-            else: age_str = f"{age // 86400}д"
-            out_lines.append(f"· {name} (был {age_str} назад)")
-        else:
-            out_lines.append(f"· {name}")
+        online.append((name, last_heard))
+
+    if not online:
+        return (
+            f"Сейчас никто не онлайн. "
+            f"Известно {total_known} узлов, но никого не слышали последние 2ч."
+        )
+
+    online.sort(key=lambda r: r[1], reverse=True)
+    # LoRa пакет ~228 байт — ограничим выдачу, остальное упомянем хвостом.
+    shown = online[:8]
+
+    out_lines = [f"Онлайн: {len(online)} (из {total_known} известных)"]
+    for name, last in shown:
+        age = now - last
+        if   age < 60:   age_str = f"{age}с"
+        elif age < 3600: age_str = f"{age // 60}м"
+        else:            age_str = f"{age // 3600}ч"
+        out_lines.append(f"· {name} ({age_str} назад)")
+
+    if len(online) > len(shown):
+        out_lines.append(f"+ ещё {len(online) - len(shown)}")
+
     return "\n".join(out_lines)
 
 

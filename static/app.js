@@ -95,6 +95,8 @@ $$(".tab-btn").forEach(btn => {
       refreshDashboard();
     } else if (CURRENT_TAB === "map") {
       refreshMap();
+    } else if (CURRENT_TAB === "misc") {
+      refreshTelegramStatus();
     }
   });
 });
@@ -113,6 +115,7 @@ async function refreshDashboard() {
     KNOWN_CHANNELS = Array.isArray(channels) ? channels : [];
     renderDashboard(stats, KNOWN_NODES);
     populateDestinationSelectors(KNOWN_NODES);
+    populateTgChannelSelect();
     rebuildConversations();
     renderConvList();
   } catch (e) { /* silent — dashboard isn't critical */ }
@@ -181,12 +184,43 @@ function populateDestinationSelectors(nodes) {
     }
   }
   fill($("#chatDestination"));
+  fill($("#tgDest"));
   // Update every per-slot dropdown too
   $$(".slot .dest").forEach(sel => {
     const prev = sel.value;
     fill(sel);
     if (prev) sel.value = prev;
   });
+}
+
+/** Fill the Telegram-bridge channel-index dropdown from KNOWN_CHANNELS. */
+function populateTgChannelSelect() {
+  const sel = $("#tgChannelIndex");
+  if (!sel) return;
+  const prev = sel.value;
+  sel.innerHTML = "";
+  // If we know the real channels, list them with names; otherwise fall back
+  // to a plain 0–7 picker.
+  const chans = (KNOWN_CHANNELS || []).filter(c => c && c.index != null);
+  if (chans.length) {
+    for (const ch of chans) {
+      const opt = document.createElement("option");
+      opt.value = String(ch.index);
+      const role = ch.role === "primary" ? " ★" : "";
+      opt.textContent = `Канал ${ch.index} — ${ch.name || ""}${role}`;
+      sel.appendChild(opt);
+    }
+  } else {
+    for (let i = 0; i < 8; i++) {
+      const opt = document.createElement("option");
+      opt.value = String(i);
+      opt.textContent = `Канал ${i}`;
+      sel.appendChild(opt);
+    }
+  }
+  if (prev && Array.from(sel.options).some(o => o.value === prev)) {
+    sel.value = prev;
+  }
 }
 
 // ---------- Node profile modal ----------
@@ -2025,5 +2059,273 @@ async function init() {
   setInterval(() => {
     if (CURRENT_TAB === "home") refreshDashboard();
   }, 30000);
+  // Auto-refresh the Telegram bridge panel while the user looks at it
+  setInterval(() => {
+    if (CURRENT_TAB === "misc") refreshTelegramStatus();
+  }, 8000);
+  // Wire telegram controls now that the DOM exists
+  wireTelegramPanel();
 }
 init().catch(e => toast(e.message, "err"));
+
+
+// ---------- Telegram bridge (experimental) ----------
+
+let TG_STATE = null;
+
+function wireTelegramPanel() {
+  // Toggle on the <summary> checkbox starts/stops the worker without saving config
+  $("#tgEnabled")?.addEventListener("change", async (e) => {
+    const on = e.target.checked;
+    try {
+      await api(on ? "/api/telegram/start" : "/api/telegram/stop", { method: "POST" });
+      toast(on ? "Telegram-мост запущен" : "Telegram-мост остановлен", "ok");
+    } catch (err) {
+      toast(err.message, "err");
+      // revert checkbox if the call failed
+      e.target.checked = !on;
+    }
+    refreshTelegramStatus();
+  });
+
+  // Mode switcher — toggle the API-credentials block visibility
+  $$('input[name="tgMode"]').forEach(r => {
+    r.addEventListener("change", () => updateTgModeUi());
+  });
+  updateTgModeUi();
+
+  $("#tgSave")?.addEventListener("click", saveTelegramConfig);
+  $("#tgTest")?.addEventListener("click", testTelegramFetch);
+  $("#tgTestSend")?.addEventListener("click", testTelegramSendMesh);
+  $("#tgStart")?.addEventListener("click", async () => {
+    try {
+      const r = await api("/api/telegram/start", { method: "POST" });
+      if (!r.ok && r.error) toast(r.error, "err"); else toast("Запущено", "ok");
+    } catch (e) { toast(e.message, "err"); }
+    refreshTelegramStatus();
+  });
+  $("#tgStop")?.addEventListener("click", async () => {
+    try {
+      await api("/api/telegram/stop", { method: "POST" });
+      toast("Остановлено", "ok");
+    } catch (e) { toast(e.message, "err"); }
+    refreshTelegramStatus();
+  });
+  $("#tgRefresh")?.addEventListener("click", refreshTelegramStatus);
+}
+
+function getTgMode() {
+  const checked = document.querySelector('input[name="tgMode"]:checked');
+  return checked ? checked.value : "web";
+}
+
+function updateTgModeUi() {
+  const mode = getTgMode();
+  const apiBlock = $("#tgApiBlock");
+  const pollRow = $("#tgPollIntervalRow");
+  const channelsHint = $("#tgChannelsHint");
+  if (apiBlock) apiBlock.hidden = (mode !== "telethon");
+  if (pollRow) pollRow.style.display = (mode === "web") ? "" : "none";
+  if (channelsHint) {
+    channelsHint.innerHTML = mode === "web"
+      ? `По одному в строке. В режиме «Без API» — только <code>@username</code> публичных каналов.`
+      : `По одному в строке. Можно <code>@username</code> или числовой ID канала (<code>-1001234567890</code>).`;
+  }
+}
+
+async function saveTelegramConfig() {
+  const mode = getTgMode();
+  const apiId = parseInt($("#tgApiId").value, 10);
+  const apiHash = $("#tgApiHash").value.trim();
+  const channels = $("#tgChannels").value
+    .split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+  const keywords = $("#tgKeywords").value
+    .split(",").map(s => s.trim()).filter(Boolean);
+  const geoFilter = $("#tgGeoFilter").value
+    .split(",").map(s => s.trim()).filter(Boolean);
+  const minIv = Math.max(0, parseInt($("#tgMinInterval").value, 10) || 60);
+  const pollIv = Math.max(15, parseInt($("#tgPollInterval").value, 10) || 60);
+  const prefix = $("#tgPrefix").value.trim() || "🚨 TG";
+
+  const proxy = $("#tgProxy").value.trim();
+  const broadcastTo = $("#tgDest").value || "broadcast";
+  const channelIndex = parseInt($("#tgChannelIndex").value, 10);
+
+  const payload = {
+    telegram: {
+      mode,
+      api_id: Number.isFinite(apiId) ? apiId : null,
+      api_hash: apiHash,
+      channels,
+      keywords,
+      geo_filter: geoFilter,
+      min_interval_seconds: minIv,
+      poll_interval_seconds: pollIv,
+      forward_prefix: prefix,
+      proxy,
+      broadcast_to: broadcastTo,
+      channel_index: Number.isFinite(channelIndex) ? channelIndex : 0,
+    }
+  };
+  try {
+    await api("/api/config", { method: "POST", body: payload });
+    toast("Сохранено", "ok");
+  } catch (e) { toast(e.message, "err"); }
+  refreshTelegramStatus();
+}
+
+async function testTelegramFetch() {
+  // Save the current proxy value first — so the test uses what user just typed.
+  const proxy = $("#tgProxy").value.trim();
+  const out = $("#tgTestResult");
+  out.hidden = false;
+  out.className = "tg-test-result";
+  out.innerHTML = `<span class="muted">⏳ Сохраняю прокси и пробую открыть t.me/s/durov…</span>`;
+  try {
+    await api("/api/config", { method: "POST", body: { telegram: { proxy } } });
+    const r = await api("/api/telegram/test", { method: "POST", body: { channel: "durov" } });
+    const via = r.via_proxy ? `через прокси (${escapeHtml(r.proxy || "?")})` : "напрямую";
+    const elapsed = r.elapsed_seconds != null ? `${r.elapsed_seconds.toFixed(1)} сек` : "—";
+    if (r.ok) {
+      const msgs = r.messages_seen != null ? `, сообщений распознано: ${r.messages_seen}` : "";
+      out.className = "tg-test-result ok";
+      out.innerHTML =
+        `✅ <strong>Связь есть</strong> — ${via}, ${elapsed}` +
+        `<div class="muted" style="margin-top:4px">HTTP ${r.status_code}, ${r.bytes} байт${msgs}</div>`;
+    } else {
+      out.className = "tg-test-result err";
+      const why = r.error || r.hint || `HTTP ${r.status_code}`;
+      out.innerHTML =
+        `❌ <strong>Не удалось</strong> — ${via}, ${elapsed}` +
+        `<div class="muted" style="margin-top:4px">${escapeHtml(why)}</div>`;
+    }
+  } catch (e) {
+    out.className = "tg-test-result err";
+    out.innerHTML = `❌ ${escapeHtml(e.message)}`;
+  }
+  refreshTelegramStatus();
+}
+
+async function testTelegramSendMesh() {
+  if (!confirm("Отправить тестовое сообщение в выбранный канал/адресат mesh?")) return;
+  const btn = $("#tgTestSend");
+  if (btn) { btn.disabled = true; btn.textContent = "Отправляю…"; }
+  try {
+    const r = await api("/api/telegram/test_send", { method: "POST", body: {} });
+    if (r.ok) {
+      const dest = r.broadcast_to === "broadcast" ? "broadcast" : r.broadcast_to;
+      toast(`Тест отправлен · канал ${r.channel_index} · ${dest}`, "ok");
+    } else {
+      toast("Ошибка: " + (r.error || "неизвестно"), "err");
+    }
+  } catch (e) {
+    toast(e.message, "err");
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = "🧪 Тест в mesh"; }
+  }
+  refreshTelegramStatus();
+}
+
+async function refreshTelegramStatus() {
+  try {
+    TG_STATE = await api("/api/telegram/status");
+  } catch (e) {
+    setTgStatus("err", `Ошибка: ${e.message}`);
+    return;
+  }
+  const s = TG_STATE;
+  const mode = s.config?.mode || s.mode || "web";
+  const modeLbl = mode === "telethon" ? "API" : "Без API";
+
+  // Pretty status dot + text
+  if (s.running) {
+    const matched = s.matched_count ?? 0;
+    const who = mode === "telethon" ? ` · ${s.username || "—"}` : "";
+    setTgStatus("ok", `Работает (${modeLbl})${who} · совпадений: ${matched}`);
+  } else if (mode === "telethon" && !s.telethon_available) {
+    setTgStatus("err", "Библиотека telethon не установлена. Запусти на Pi: pip install telethon");
+  } else if (mode === "telethon" && !s.session_exists) {
+    setTgStatus("warn", "Сессия не создана. SSH в Pi и запусти python telegram_setup.py");
+  } else if (s.last_error) {
+    setTgStatus("err", s.last_error);
+  } else {
+    setTgStatus("idle", `Мост остановлен (${modeLbl})`);
+  }
+  // Reflect checkbox state to match worker state
+  const cb = $("#tgEnabled");
+  if (cb) cb.checked = !!s.running;
+
+  // Populate config fields (only if currently empty — avoid stomping user typing)
+  const cfg = s.config || {};
+  // Mode radio reflects persisted config
+  const modeFromCfg = cfg.mode || "web";
+  const modeRadio = document.querySelector(`input[name="tgMode"][value="${modeFromCfg}"]`);
+  if (modeRadio && !modeRadio.checked) {
+    modeRadio.checked = true;
+    updateTgModeUi();
+  }
+  if (!$("#tgApiId").value && cfg.api_id_set) $("#tgApiId").placeholder = "(сохранено)";
+  if (!$("#tgApiHash").value && cfg.api_hash_set) $("#tgApiHash").placeholder = "(сохранено)";
+  if (!$("#tgChannels").value) $("#tgChannels").value = (cfg.channels || []).join("\n");
+  if (!$("#tgKeywords").value) $("#tgKeywords").value = (cfg.keywords || []).join(", ");
+  if (!$("#tgGeoFilter").value && (cfg.geo_filter || []).length) {
+    $("#tgGeoFilter").value = (cfg.geo_filter || []).join(", ");
+  }
+  if (cfg.min_interval_seconds != null && $("#tgMinInterval").value === "60") {
+    $("#tgMinInterval").value = cfg.min_interval_seconds;
+  }
+  if (cfg.poll_interval_seconds != null && $("#tgPollInterval").value === "60") {
+    $("#tgPollInterval").value = cfg.poll_interval_seconds;
+  }
+  if (cfg.forward_prefix && $("#tgPrefix").value === "🚨 TG") {
+    $("#tgPrefix").value = cfg.forward_prefix;
+  }
+  if (cfg.proxy && !$("#tgProxy").value) {
+    $("#tgProxy").value = cfg.proxy;
+  }
+
+  // Make sure the destination + channel selects have the freshest options
+  // available, then restore the persisted selection.
+  if ($("#tgDest") && (!$("#tgDest").value || $("#tgDest").value === "broadcast")) {
+    if (cfg.broadcast_to) $("#tgDest").value = cfg.broadcast_to;
+  }
+  if ($("#tgChannelIndex") && cfg.channel_index != null) {
+    const want = String(cfg.channel_index);
+    if (Array.from($("#tgChannelIndex").options).some(o => o.value === want)) {
+      $("#tgChannelIndex").value = want;
+    }
+  }
+
+  // Render recent matches
+  const hist = $("#tgHistory");
+  if (hist) {
+    const items = s.recent_matches || [];
+    if (!items.length) {
+      hist.innerHTML = `<div class="muted">Ничего пока не было.</div>`;
+    } else {
+      hist.innerHTML = items.map(m => {
+        const ts = new Date(m.ts * 1000).toLocaleString();
+        const throttled = m.throttled
+          ? `<span class="tg-throttled" title="не отправлено в mesh из-за паузы">⏸ паузой</span>`
+          : "";
+        const preview = (m.text || "").replace(/\s+/g, " ").slice(0, 240);
+        return `<div class="tg-match">
+          <div class="tg-match-head">
+            <span class="tg-match-channel">📡 ${escapeHtml(m.channel)}</span>
+            <span class="tg-match-kw">«${escapeHtml(m.keyword)}»</span>
+            <span class="tg-match-ts muted">${ts}</span>
+            ${throttled}
+          </div>
+          <div class="tg-match-text">${escapeHtml(preview)}</div>
+        </div>`;
+      }).join("");
+    }
+  }
+}
+
+function setTgStatus(kind, text) {
+  const dot = $("#tgStatusDot");
+  const txt = $("#tgStatusText");
+  if (dot) dot.className = `tg-dot tg-dot-${kind}`;
+  if (txt) txt.textContent = text;
+}

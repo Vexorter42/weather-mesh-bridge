@@ -20,5 +20,16 @@
     "include_header": true,
     "use_emojis": false
   },
-  "schedules": []
+  "schedules": [],
+  "telegram": {
+    "enabled": false,
+    "api_id": null,
+    "api_hash": "",
+    "channels": [],
+    "keywords": ["БПЛА", "беспилотник", "угроза", "тревога", "атака", "ракет"],
+    "broadcast_to": "broadcast",
+    "channel_index": 0,
+    "min_interval_seconds": 60,
+    "forward_prefix": "🚨 TG"
+  }
 }

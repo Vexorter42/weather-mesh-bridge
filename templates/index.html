@@ -4,6 +4,9 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Weather → Heltec Mesh Bridge</title>
+  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+  <link rel="mask-icon" href="/static/favicon.svg" color="#8b9eff">
+  <meta name="theme-color" content="#0a0e1a">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap">
@@ -40,6 +43,7 @@
     <button class="tab-btn" data-tab="map">🗺 Карта</button>
     <button class="tab-btn" data-tab="settings">⚙️ Настройки</button>
     <button class="tab-btn" data-tab="chat">💬 Чат <span class="badge" id="chatBadge" hidden>0</span></button>
+    <button class="tab-btn" data-tab="misc">🧪 Прочее</button>
   </nav>
 
   <main>
@@ -344,6 +348,145 @@
       </section>
     </div>
   </main>
+
+    <!-- =================== MISC TAB =================== -->
+    <div class="tab-panel" data-tab="misc">
+      <section class="card">
+        <h2>🧪 Экспериментальное</h2>
+        <p class="hint">
+          Фичи в разработке. Включай только то, что понимаешь — оно может ломаться, есть лишние зависимости и т.п.
+        </p>
+
+        <!-- ===== Telegram bridge ===== -->
+        <details class="experiment" id="experimentTg">
+          <summary>
+            <label class="toggle-row" onclick="event.stopPropagation();">
+              <input type="checkbox" id="tgEnabled">
+              <span><strong>Telegram-мост</strong> — пересылать сообщения из каналов про БПЛА в mesh</span>
+            </label>
+          </summary>
+
+          <div class="experiment-body">
+            <p class="hint">
+              Бот слушает указанные Telegram-каналы и при появлении ключевого слова шлёт сообщение в mesh.
+              Подходит для каналов, куда обычного бота не добавить — типа официальных каналов МЧС / военкомов / тревог по БПЛА.
+            </p>
+
+            <div class="tg-status" id="tgStatus">
+              <span class="tg-dot" id="tgStatusDot"></span>
+              <span id="tgStatusText">Загружаю состояние…</span>
+            </div>
+
+            <div class="profile-section">Режим работы</div>
+            <div class="tg-mode-radio">
+              <label class="tg-mode-option">
+                <input type="radio" name="tgMode" value="web" checked>
+                <div>
+                  <strong>Без API</strong> <span class="muted">(рекомендуется)</span><br>
+                  <span class="muted">Парсит публичные превью-страницы каналов на t.me. Не нужен api_id, не нужна авторизация — работает с любого IP. Только публичные каналы по @username.</span>
+                </div>
+              </label>
+              <label class="tg-mode-option">
+                <input type="radio" name="tgMode" value="telethon">
+                <div>
+                  <strong>С API</strong> <span class="muted">(для приватных каналов)</span><br>
+                  <span class="muted">MTProto через Telethon. Нужны api_id / api_hash с my.telegram.org + одноразовая авторизация по SMS через SSH. Видит каналы по числовому ID и приватные каналы, в которые ты подписан.</span>
+                </div>
+              </label>
+            </div>
+
+            <!-- API-credentials block — only shown for telethon mode -->
+            <div id="tgApiBlock" hidden>
+              <div class="profile-section">Авторизация (одноразово, через SSH)</div>
+              <p class="hint">
+                1. Возьми <code>api_id</code> и <code>api_hash</code> на
+                <a href="https://my.telegram.org" target="_blank" rel="noopener">my.telegram.org → API development tools</a>.<br>
+                2. Сохрани их ниже, нажми «Сохранить».<br>
+                3. На Pi через SSH запусти один раз:
+                <code>cd /home/pi/weather-mesh-bridge && source .venv/bin/activate && python telegram_setup.py</code><br>
+                Введи телефон + SMS-код (и 2FA пароль если включён). Сессия сохранится.
+              </p>
+              <div class="grid2">
+                <label>api_id
+                  <input type="number" id="tgApiId" placeholder="1234567">
+                </label>
+                <label>api_hash
+                  <input type="text" id="tgApiHash" placeholder="abcd1234ef…">
+                </label>
+              </div>
+            </div>
+
+            <div class="profile-section">Прокси <small>(если t.me у твоего провайдера зарезано)</small></div>
+            <p class="hint">
+              Формат URL. Примеры:<br>
+              <code>socks5://127.0.0.1:1080</code> — локальный SOCKS5 (например, от <code>ssh -D</code>)<br>
+              <code>socks5://user:pass@1.2.3.4:1080</code> — удалённый с авторизацией<br>
+              <code>http://1.2.3.4:8080</code> — обычный HTTP-прокси<br>
+              Пусто — ходить напрямую без прокси.
+            </p>
+            <div class="row">
+              <input type="text" id="tgProxy" placeholder="socks5://host:port или пусто" style="flex: 1;">
+              <button id="tgTest" class="ghost">🔍 Проверить</button>
+            </div>
+            <div id="tgTestResult" class="tg-test-result" hidden></div>
+
+            <div class="profile-section">Каналы для прослушки</div>
+            <p class="hint" id="tgChannelsHint">По одному в строке. В режиме «Без API» — только <code>@username</code> публичных каналов.</p>
+            <textarea id="tgChannels" rows="4" placeholder="@bpla_alerts&#10;@example_channel" class="tg-textarea"></textarea>
+
+            <div class="profile-section">Ключевые слова</div>
+            <p class="hint">Через запятую. Совпадение по подстроке, без учёта регистра. Хотя бы одно слово должно быть в сообщении.</p>
+            <input type="text" id="tgKeywords" placeholder="БПЛА, беспилотник, ракет, тревога">
+
+            <div class="profile-section">Гео-фильтр <small>(опционально — сужает алерты до твоего региона)</small></div>
+            <p class="hint">
+              Если задан — сообщение должно содержать <strong>и</strong> ключевое слово, <strong>и</strong> хотя бы одно из этих.
+              Пусто — пропускать любой матч по ключевым словам.<br>
+              Пример: <code>Чувашия, Чебоксары, Татарстан, Марий Эл, Нижний Новгород</code>
+            </p>
+            <input type="text" id="tgGeoFilter" placeholder="Чувашия, Чебоксары, Нижний Новгород">
+
+            <div class="profile-section">Куда транслировать в mesh</div>
+            <p class="hint">Найденные сообщения уйдут в этот канал Meshtastic и этому адресату.</p>
+            <div class="grid2">
+              <label>Канал Meshtastic
+                <select id="tgChannelIndex"></select>
+              </label>
+              <label>Адресат
+                <select id="tgDest">
+                  <option value="broadcast">📢 Broadcast</option>
+                </select>
+              </label>
+            </div>
+
+            <div class="grid2">
+              <label>Пауза между пересылками от одного канала, сек
+                <input type="number" id="tgMinInterval" min="0" max="3600" step="10" value="60">
+              </label>
+              <label>Префикс в mesh-сообщении
+                <input type="text" id="tgPrefix" value="🚨 TG" maxlength="32">
+              </label>
+              <label id="tgPollIntervalRow">Интервал опроса каналов, сек <small>(только для «Без API»)</small>
+                <input type="number" id="tgPollInterval" min="15" max="3600" step="15" value="60">
+              </label>
+            </div>
+
+            <div class="row">
+              <button id="tgSave">💾 Сохранить</button>
+              <button id="tgStart" class="primary">▶ Запустить мост</button>
+              <button id="tgStop" class="danger-action">⏹ Остановить</button>
+              <button id="tgRefresh" class="ghost">↻ Обновить</button>
+              <button id="tgTestSend" class="ghost" title="Отправить тестовое сообщение в mesh">🧪 Тест в mesh</button>
+            </div>
+
+            <div class="profile-section">Последние совпадения</div>
+            <div id="tgHistory" class="tg-history">
+              <div class="muted">Ничего пока не было.</div>
+            </div>
+          </div>
+        </details>
+      </section>
+    </div>
 
   <div id="toast" class="toast"></div>
 
