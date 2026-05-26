@@ -118,6 +118,8 @@ def fetch_weather(latitude: float, longitude: float, timezone: str = "auto") -> 
                 "wind_speed_10m",
                 "wind_direction_10m",
                 "wind_gusts_10m",
+                "visibility",
+                "soil_temperature_0cm",
             ]
         ),
         "hourly": ",".join(
@@ -127,6 +129,7 @@ def fetch_weather(latitude: float, longitude: float, timezone: str = "auto") -> 
                 "weather_code",
                 "precipitation_probability",
                 "wind_speed_10m",
+                "relative_humidity_2m",
             ]
         ),
         "daily": ",".join(

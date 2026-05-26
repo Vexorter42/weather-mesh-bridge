@@ -7,11 +7,15 @@ a new command is a one-decorator job.
 from __future__ import annotations
 
 import logging
+import math
 import time
 from datetime import datetime
 from typing import Any, Callable, Optional
 
 import weather
+
+# Set when app.py starts up — used by /uptime.
+BOT_START_TS: float = time.time()
 
 log = logging.getLogger(__name__)
 
@@ -107,14 +111,158 @@ def cmd_help(args, msg, bridge, cfg):
     return "\n".join(lines)
 
 
-@command("ping", help_text="/ping — проверка связи (отвечает pong)")
+def _hops_phrase(n: Optional[int]) -> str:
+    """Human-readable Russian plural for hop count. Mirrors the UI strip."""
+    if n is None:
+        return ""
+    if n == 0:
+        return "↯ напрямую"
+    last = n % 10
+    last2 = n % 100
+    if last == 1 and last2 != 11:
+        word = "прыжок"
+    elif last in (2, 3, 4) and not (12 <= last2 <= 14):
+        word = "прыжка"
+    else:
+        word = "прыжков"
+    return f"↯ {n} {word}"
+
+
+@command("ping", help_text="/ping — проверка связи (отвечает pong + кол-во hops)")
 def cmd_ping(args, msg, bridge, cfg):
-    return f"pong · {datetime.now().strftime('%H:%M:%S')}"
+    time_str = datetime.now().strftime("%H:%M")
+    hops = msg.get("hops_taken")
+    parts = [f"pong · {time_str}"]
+    hp = _hops_phrase(hops)
+    if hp:
+        parts.append(hp)
+    return " · ".join(parts)
 
 
 @command("время", "time", help_text="/время — текущее время на боте")
 def cmd_time(args, msg, bridge, cfg):
     return f"Время на боте: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}"
+
+
+def _format_uptime(seconds: int) -> str:
+    if seconds < 60:
+        return f"{seconds}с"
+    if seconds < 3600:
+        return f"{seconds // 60}м {seconds % 60}с"
+    if seconds < 86400:
+        h = seconds // 3600
+        m = (seconds % 3600) // 60
+        return f"{h}ч {m}м"
+    d = seconds // 86400
+    h = (seconds % 86400) // 3600
+    return f"{d}д {h}ч"
+
+
+@command("uptime", "аптайм", help_text="/uptime — сколько работает бот + статистика")
+def cmd_uptime(args, msg, bridge, cfg):
+    uptime = int(time.time() - BOT_START_TS)
+    # Pull aggregate stats from chat_db if bridge has a reference to it
+    db = getattr(bridge, "_db", None)
+    sent_24h = recv_24h = total = 0
+    if db is not None:
+        try:
+            stats = db.stats()
+            sent_24h = stats.get("sent_24h", 0)
+            recv_24h = stats.get("received_24h", 0)
+            total = stats.get("total_messages", 0)
+        except Exception:
+            log.exception("/uptime: chat_db.stats() failed")
+    return (
+        f"⏱ Работаю {_format_uptime(uptime)}\n"
+        f"за 24ч: ↑{sent_24h} ↓{recv_24h}\n"
+        f"всего в БД: {total}"
+    )
+
+
+def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Great-circle distance between two lat/lon points, in kilometres."""
+    R = 6371.0
+    φ1, φ2 = math.radians(lat1), math.radians(lat2)
+    dφ = math.radians(lat2 - lat1)
+    dλ = math.radians(lon2 - lon1)
+    a = math.sin(dφ / 2) ** 2 + math.cos(φ1) * math.cos(φ2) * math.sin(dλ / 2) ** 2
+    return 2 * R * math.asin(math.sqrt(a))
+
+
+def _bearing_deg(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Initial bearing (azimuth) from point 1 to point 2, in degrees 0-360."""
+    φ1, φ2 = math.radians(lat1), math.radians(lat2)
+    dλ = math.radians(lon2 - lon1)
+    y = math.sin(dλ) * math.cos(φ2)
+    x = math.cos(φ1) * math.sin(φ2) - math.sin(φ1) * math.cos(φ2) * math.cos(dλ)
+    return (math.degrees(math.atan2(y, x)) + 360) % 360
+
+
+def _compass_8(deg: float) -> str:
+    """0..360 → С/СВ/В/ЮВ/Ю/ЮЗ/З/СЗ."""
+    dirs = ["С", "СВ", "В", "ЮВ", "Ю", "ЮЗ", "З", "СЗ"]
+    return dirs[int((deg + 22.5) // 45) % 8]
+
+
+def _find_node(bridge, query: str) -> Optional[dict]:
+    """Match a node by node_id (!hex), short_name or part of long_name."""
+    if not query or not bridge:
+        return None
+    q = query.strip().lower().lstrip("!")
+    try:
+        nodes = bridge.get_known_nodes()
+    except Exception:
+        return None
+    # 1) Exact node_id match (handles "!a1b2c3d4")
+    for n in nodes:
+        nid = (n.get("node_id") or "").lstrip("!").lower()
+        if nid == q:
+            return n
+    # 2) Exact short_name match
+    for n in nodes:
+        if (n.get("short_name") or "").lower() == q:
+            return n
+    # 3) Substring match on long_name
+    for n in nodes:
+        if q in (n.get("long_name") or "").lower():
+            return n
+    return None
+
+
+@command("где", "where", help_text="/где <узел> — расстояние и азимут от бота до узла")
+def cmd_where(args, msg, bridge, cfg):
+    if not args:
+        return "Использование: /где <имя_узла или !id>"
+    query = " ".join(args)
+    target = _find_node(bridge, query)
+    if not target:
+        return f"Узел «{query}» не найден среди слышимых нод. Попробуй полный ID или short_name."
+
+    tlat, tlon = target.get("latitude"), target.get("longitude")
+    if tlat is None or tlon is None:
+        return f"У узла «{target.get('long_name') or query}» нет координат — он ещё не слал POSITION_APP."
+
+    # Find OUR position too — use bot's own node entry
+    status = bridge.status() if bridge else {}
+    my_num = status.get("my_node_num")
+    my_lat = my_lon = None
+    if my_num is not None:
+        for n in bridge.get_known_nodes():
+            if n.get("num") == my_num:
+                my_lat, my_lon = n.get("latitude"), n.get("longitude")
+                break
+    # Fallback: configured city location
+    if my_lat is None or my_lon is None:
+        loc = (cfg or {}).get("location") or {}
+        my_lat, my_lon = loc.get("latitude"), loc.get("longitude")
+    if my_lat is None or my_lon is None:
+        return "У бота нет координат — не могу посчитать расстояние."
+
+    dist_km = _haversine_km(my_lat, my_lon, float(tlat), float(tlon))
+    az = _bearing_deg(my_lat, my_lon, float(tlat), float(tlon))
+    name = target.get("long_name") or target.get("short_name") or target.get("node_id") or "?"
+    dist_str = f"{dist_km*1000:.0f} м" if dist_km < 1 else f"{dist_km:.1f} км"
+    return f"до {name}: {dist_str} · {az:.0f}° ({_compass_8(az)})"
 
 
 def _resolve_location(args, cfg):

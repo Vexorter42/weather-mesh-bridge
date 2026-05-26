@@ -84,6 +84,44 @@ class ChatDb:
             if "delivery_hops" not in cols:
                 c.execute("ALTER TABLE messages ADD COLUMN delivery_hops INTEGER")
 
+            # Full-text search index over the text column. FTS5 ships with
+            # stock SQLite on Debian/Raspberry Pi OS. Triggers keep it in
+            # sync with the main table.
+            try:
+                c.execute(
+                    """
+                    CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+                        text, content='messages', content_rowid='id', tokenize = 'unicode61'
+                    )
+                    """
+                )
+                # Triggers
+                c.execute("""
+                    CREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages BEGIN
+                        INSERT INTO messages_fts(rowid, text) VALUES (new.id, new.text);
+                    END
+                """)
+                c.execute("""
+                    CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN
+                        INSERT INTO messages_fts(messages_fts, rowid, text) VALUES('delete', old.id, old.text);
+                    END
+                """)
+                c.execute("""
+                    CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE ON messages BEGIN
+                        INSERT INTO messages_fts(messages_fts, rowid, text) VALUES('delete', old.id, old.text);
+                        INSERT INTO messages_fts(rowid, text) VALUES (new.id, new.text);
+                    END
+                """)
+                # If the FTS index is empty but messages exist — backfill once.
+                row = c.execute("SELECT COUNT(*) FROM messages_fts").fetchone()
+                if row and row[0] == 0:
+                    mrow = c.execute("SELECT COUNT(*) FROM messages").fetchone()
+                    if mrow and mrow[0] > 0:
+                        c.execute("INSERT INTO messages_fts(rowid, text) SELECT id, text FROM messages")
+                        log.info("FTS5 backfilled with %s existing messages", mrow[0])
+            except sqlite3.OperationalError as exc:
+                log.warning("FTS5 init failed (likely unsupported by this sqlite build): %s", exc)
+
     # ------------------------------------------------------------------
     # CRUD
     # ------------------------------------------------------------------
@@ -154,6 +192,38 @@ class ChatDb:
                 (int(mesh_msg_id),),
             ).fetchone()
             return self._row_to_dict(row) if row else None
+
+    def search(self, query: str, limit: int = 100) -> list[dict[str, Any]]:
+        """Full-text search via FTS5. Returns matching messages newest-first.
+
+        Supports the standard FTS5 query syntax — prefix-matches via `word*`,
+        booleans `AND`/`OR`/`NOT`, phrase `"two words"`. Falls back to a LIKE
+        scan if FTS5 isn't available on this SQLite build.
+        """
+        q = (query or "").strip()
+        if not q:
+            return []
+        with self._lock:
+            c = self._connect()
+            try:
+                rows = c.execute(
+                    """
+                    SELECT m.* FROM messages m
+                    JOIN messages_fts f ON f.rowid = m.id
+                    WHERE messages_fts MATCH ?
+                    ORDER BY m.id DESC
+                    LIMIT ?
+                    """,
+                    (q, int(limit)),
+                ).fetchall()
+            except sqlite3.OperationalError:
+                # FTS5 absent — fall back to plain LIKE
+                like = f"%{q}%"
+                rows = c.execute(
+                    "SELECT * FROM messages WHERE text LIKE ? ORDER BY id DESC LIMIT ?",
+                    (like, int(limit)),
+                ).fetchall()
+            return [self._row_to_dict(r) for r in rows]
 
     def get_by_ids(self, ids: list[int]) -> list[dict[str, Any]]:
         """Fetch multiple messages by their internal IDs. Used for status polling."""

@@ -393,7 +393,7 @@ class MeshBridge:
             log.exception("Failed to update delivery status")
 
     def traceroute(self, destination: str, hop_limit: int = 5,
-                   channel_index: int = 0, timeout: float = 30.0) -> dict[str, Any]:
+                   channel_index: int = 0, timeout: float = 60.0) -> dict[str, Any]:
         """Send a traceroute request and block waiting for the reply.
 
         Returns a dict { hops: [{node_id, name, num}], snr_towards: [...],

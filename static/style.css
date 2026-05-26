@@ -1528,6 +1528,147 @@ button.run-now:disabled { opacity: 0.5; cursor: wait; }
   50%      { box-shadow: 0 0 0 3px rgba(255, 122, 138, 0.65); }
 }
 
+/* ---------- Weather widget on the dashboard ---------- */
+.weather-widget-card .ww-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.weather-widget-card .ww-city { font-size: 0.92rem; }
+.ww-main {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  margin-bottom: 14px;
+}
+.ww-temp {
+  font-size: 3.2rem;
+  font-weight: 800;
+  letter-spacing: -0.04em;
+  color: #fff;
+  font-variant-numeric: tabular-nums;
+  text-shadow: 0 0 24px var(--accent-glow);
+}
+.ww-cond { display: flex; flex-direction: column; gap: 2px; }
+.ww-emoji { font-size: 1.8rem; line-height: 1; }
+.ww-cond-text { font-weight: 600; color: #fff; font-size: 0.96rem; }
+.ww-feels { font-size: 0.82rem; }
+.ww-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 10px;
+}
+@media (max-width: 540px) { .ww-grid { grid-template-columns: 1fr; } }
+.ww-item {
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-sm);
+  padding: 10px 14px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 0.88rem;
+}
+.ww-item strong { color: #fff; font-weight: 600; }
+
+/* ---------- Hourly chart ---------- */
+.hourly-chart-wrap {
+  margin-top: 10px;
+  padding: 6px;
+  background: rgba(0, 0, 0, 0.25);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--glass-border);
+  position: relative;          /* anchor for the absolute-positioned tooltip */
+}
+.hc-hit { cursor: crosshair; }
+.hc-tooltip {
+  position: absolute;
+  pointer-events: none;
+  background: var(--glass-bg-strong);
+  border: 1px solid var(--glass-border-strong);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  border-radius: var(--radius-sm);
+  padding: 8px 12px;
+  font-size: 0.82rem;
+  line-height: 1.45;
+  color: var(--text);
+  box-shadow: var(--shadow-lg);
+  min-width: 120px;
+  z-index: 5;
+  font-variant-numeric: tabular-nums;
+}
+.hc-tooltip[hidden] { display: none; }
+.hc-tooltip .hc-tt-time {
+  font-weight: 700;
+  color: var(--accent);
+  margin-bottom: 4px;
+  padding-bottom: 4px;
+  border-bottom: 1px dashed var(--glass-border);
+}
+.hc-tooltip strong { color: #fff; font-weight: 700; }
+.hourly-svg {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+.hourly-svg .hc-tick {
+  font-size: 11px;
+  fill: var(--muted);
+  font-family: var(--font-sans);
+  font-variant-numeric: tabular-nums;
+}
+.hourly-legend {
+  font-size: 0.78rem;
+  margin-top: 8px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+.hl-line {
+  display: inline-block; width: 22px; height: 3px; border-radius: 2px;
+  background: linear-gradient(90deg, #8b9eff, #d77bff, #4dd0e1);
+}
+.hl-bar {
+  display: inline-block; width: 8px; height: 12px; border-radius: 2px;
+  background: rgba(106,163,255,0.5);
+  vertical-align: middle;
+}
+
+/* ---------- Map foot extras (radar controls) ---------- */
+.map-foot-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* ---------- Chat search bar ---------- */
+.chat-search-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+  flex-wrap: nowrap;
+}
+#chatSearchInput {
+  width: 220px;
+  background: rgba(0,0,0,0.25);
+  border: 1px solid var(--glass-border);
+  color: var(--text);
+  padding: 6px 10px;
+  border-radius: 999px;
+  font-size: 0.86rem;
+}
+#chatSearchInput:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-glow); }
+#chatSearchClear { padding: 4px 8px; font-size: 0.85rem; border-radius: 999px; }
+@media (max-width: 540px) {
+  #chatSearchInput { width: 140px; }
+}
+
 /* ---------- Traceroute result panel (inside node profile modal) ---------- */
 .traceroute-result {
   margin-top: 8px;
@@ -1893,6 +2034,91 @@ button.run-now:disabled { opacity: 0.5; cursor: wait; }
   color: var(--warn);
   font-weight: 600;
 }
+
+/* --- Debug "all seen" feed --- */
+.tg-seen-block {
+  margin-top: 14px;
+  padding: 10px 14px;
+  border: 1px dashed var(--glass-border);
+  border-radius: var(--radius-sm);
+  background: rgba(0, 0, 0, 0.18);
+}
+.tg-seen-block summary {
+  cursor: pointer;
+  list-style: none;
+  font-size: 0.86rem;
+  padding: 2px 0;
+  user-select: none;
+}
+.tg-seen-block summary::-webkit-details-marker { display: none; }
+.tg-seen-block summary::after {
+  content: "▾";
+  float: right;
+  color: var(--muted);
+  transition: transform var(--transition);
+}
+.tg-seen-block[open] summary::after { transform: rotate(180deg); }
+.tg-seen-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 10px 0;
+  flex-wrap: wrap;
+}
+.tg-seen-controls select { width: auto; flex: 0 0 auto; min-width: 200px; }
+.tg-seen-controls #tgSeenStats {
+  font-size: 0.78rem;
+  font-variant-numeric: tabular-nums;
+}
+.tg-seen {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 400px;
+  overflow-y: auto;
+}
+.tg-seen-item {
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  font-size: 0.84rem;
+}
+.tg-seen-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+  font-size: 0.76rem;
+}
+.tg-seen-channel { color: #fff; font-weight: 700; }
+.tg-seen-meta {
+  color: var(--accent);
+  font-weight: 500;
+}
+.tg-seen-ts {
+  font-variant-numeric: tabular-nums;
+  margin-left: auto;
+  font-size: 0.72rem;
+}
+.tg-seen-text {
+  color: var(--text-soft);
+  line-height: 1.4;
+  word-break: break-word;
+}
+.tg-seen-badge {
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 0.7rem;
+  font-weight: 700;
+  border: 1px solid;
+  text-transform: lowercase;
+  letter-spacing: 0.02em;
+}
+.tg-seen-badge.ok   { color: var(--good); border-color: var(--good); background: var(--good-glow); }
+.tg-seen-badge.warn { color: var(--warn); border-color: var(--warn); background: var(--warn-glow); }
+.tg-seen-badge.mute { color: var(--muted); border-color: var(--glass-border); background: rgba(255,255,255,0.04); }
 
 /* ---------- Toast ---------- */
 .toast {

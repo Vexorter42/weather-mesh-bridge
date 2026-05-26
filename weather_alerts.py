@@ -27,11 +27,18 @@ DEFAULTS = {
     "frost_threshold_c": -5,        # ночные заморозки до −5 и ниже
     "heat_threshold_c": 30,         # дневная жара от +30 и выше
     "thunderstorm_alerts": True,    # текущая гроза
+    "fog_alerts": True,             # туман (видимость ниже порога)
+    "fog_visibility_m": 200,        # порог видимости в метрах
+    "ice_alerts": True,             # вероятность гололёда
     "check_interval_minutes": 15,
 }
 
 # WMO weather codes that count as thunderstorm
 THUNDERSTORM_CODES = {95, 96, 99}
+# WMO codes that mean fog directly
+FOG_CODES = {45, 48}
+# WMO codes that imply freezing precipitation (already ice on roads)
+FREEZING_RAIN_CODES = {56, 57, 66, 67}
 
 
 class AlertsState:
@@ -189,6 +196,81 @@ def check(cfg: dict[str, Any], bridge: Any, state: AlertsState) -> list[dict[str
             "heat",
             f"🔥 Жара{' в ' + city if city else ''}: до +{tmax:.0f}°C. Пейте воду, прячьтесь в тень.",
         ))
+
+    # Туман — либо WMO-код тумана, либо `visibility` ниже порога.
+    cur = data.get("current") or {}
+    if alerts_cfg.get("fog_alerts") and not state.already_sent("fog", today):
+        cur_code = cur.get("weather_code")
+        try:
+            cur_code = int(cur_code) if cur_code is not None else None
+        except (TypeError, ValueError):
+            cur_code = None
+        visibility = cur.get("visibility")
+        try:
+            visibility = float(visibility) if visibility is not None else None
+        except (TypeError, ValueError):
+            visibility = None
+        fog_threshold = float(alerts_cfg.get("fog_visibility_m", 200))
+        if cur_code in FOG_CODES:
+            to_send.append((
+                "fog",
+                f"🌫 Туман{' в ' + city if city else ''}. Видимость ограничена, езжайте осторожно.",
+            ))
+        elif visibility is not None and visibility <= fog_threshold:
+            to_send.append((
+                "fog",
+                f"🌫 Сильный туман{' в ' + city if city else ''}: видимость ~{int(visibility)} м.",
+            ))
+
+    # Гололёд / гололедица.
+    # Эвристика:
+    #   1) Прямо сейчас идёт freezing rain — мгновенно опасно
+    #   2) Температура около 0°C (±2°C) и сейчас (или скоро) выпадают осадки
+    #   3) Текущая температура поднялась выше нуля после морозов — тающий лёд + ночная заморозка
+    if alerts_cfg.get("ice_alerts") and not state.already_sent("ice", today):
+        cur_code = cur.get("weather_code")
+        try:
+            cur_code = int(cur_code) if cur_code is not None else None
+        except (TypeError, ValueError):
+            cur_code = None
+        try:
+            t_now = float(cur.get("temperature_2m")) if cur.get("temperature_2m") is not None else None
+        except (TypeError, ValueError):
+            t_now = None
+        try:
+            precip_now = float(cur.get("precipitation") or 0)
+        except (TypeError, ValueError):
+            precip_now = 0
+        try:
+            soil_temp = cur.get("soil_temperature_0cm")
+            soil_temp = float(soil_temp) if soil_temp is not None else None
+        except (TypeError, ValueError):
+            soil_temp = None
+        try:
+            tmin_today = float(daily.get("temperature_2m_min", [None])[0])
+        except (TypeError, ValueError, IndexError):
+            tmin_today = None
+        try:
+            tmax_today = float(daily.get("temperature_2m_max", [None])[0])
+        except (TypeError, ValueError, IndexError):
+            tmax_today = None
+
+        ice_reason = None
+        if cur_code in FREEZING_RAIN_CODES:
+            ice_reason = "ледяной дождь"
+        elif t_now is not None and -2 <= t_now <= 2 and precip_now > 0:
+            ice_reason = f"осадки при {t_now:+.0f}°C"
+        elif (
+            tmin_today is not None and tmax_today is not None
+            and tmin_today < 0 < tmax_today
+            and (precip_now > 0 or (soil_temp is not None and -2 <= soil_temp <= 2))
+        ):
+            ice_reason = "перепад через 0°C"
+        if ice_reason:
+            to_send.append((
+                "ice",
+                f"🧊 Возможен гололёд{' в ' + city if city else ''} ({ice_reason}). На дорогах скользко.",
+            ))
 
     if not to_send:
         return []

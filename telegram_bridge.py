@@ -65,6 +65,39 @@ DEFAULTS = {
     "min_interval_seconds": 60,
     "poll_interval_seconds": 60,  # web mode polling cadence
     "forward_prefix": "🚨 TG",
+    # Strip emoji and other pictographs from forwarded messages — TG channels
+    # love decorating text, and emojis are 3-4 bytes (up to 28 for ZWJ sequences
+    # like 🏴‍☠️) so trimming them frees a lot of room in a 228-byte LoRa packet.
+    # The prefix above is NOT stripped — it's user-controlled.
+    "strip_emoji": True,
+    # Whether to include @source_username in the header. Turn off for minimal
+    # messages (just the body). Together with empty forward_prefix gives a
+    # raw-body forward — useful for super-tight LoRa packets.
+    "include_source": True,
+    # User-defined blocklist — lines containing any of these substrings are
+    # stripped from the body. Channels love trailing ads ("Обход белых
+    # списков – @somebot") and self-signatures ("Подписаться: @channel").
+    # Substring match by default; lines starting with "re:" are regex.
+    # Case-insensitive.
+    "blocklist_lines": [],
+    # Auto-strip lines containing the source channel's own @username
+    # (eliminates the "Channel Name – @channel_name" footer most channels add).
+    "strip_self_signature": True,
+    # ---- Spam protection ----
+    # Maximum body length (after all stripping) — if longer, body is cut to
+    # this length + "…". 0 = no truncation. Smaller = less LoRa chunks.
+    "max_message_chars": 500,
+    # If the body contains more than this many @-mentions, drop the entire
+    # message (probably a channel list / promo, not a real alert). 0 = no
+    # check. Typical real alert has 0-2 mentions.
+    "max_at_mentions": 5,
+    # If the body contains more than this many URLs (http / t.me / @bot-like),
+    # drop it. 0 = no check.
+    "max_urls": 3,
+    # Keep only the first N paragraphs (split by blank line). 0 = keep all.
+    # Useful when channels suffix the alert with a long subscription list:
+    # 2-3 keeps the lead, drops the spam.
+    "keep_first_paragraphs": 0,
     # SOCKS5 / HTTP proxy for accessing t.me when ISP blocks it.
     # Examples:
     #   "socks5h://127.0.0.1:1080"           — local SOCKS5 (DNS through proxy)
@@ -152,6 +185,150 @@ def _strip_tags(s: str) -> str:
     return html_lib.unescape(s).strip()
 
 
+# Comprehensive emoji + pictograph ranges. Covers face emojis, transport,
+# flags (regional indicators), supplemental pictographs, dingbats, misc
+# symbols, plus combining marks used in compound emojis (ZWJ, variation
+# selectors, skin-tone modifiers).
+_EMOJI_RE = re.compile(
+    "["
+    "\U0001F600-\U0001F64F"   # emoticons
+    "\U0001F300-\U0001F5FF"   # symbols & pictographs
+    "\U0001F680-\U0001F6FF"   # transport & map
+    "\U0001F1E0-\U0001F1FF"   # flags (regional indicator A-Z)
+    "\U0001F900-\U0001F9FF"   # supplemental symbols & pictographs
+    "\U0001FA70-\U0001FAFF"   # symbols & pictographs extended-A
+    "\U00002600-\U000026FF"   # misc symbols
+    "\U00002700-\U000027BF"   # dingbats
+    "\U0001F018-\U0001F270"   # various extras
+    "\U0001F000-\U0001F02F"   # mahjong/dominoes/playing cards
+    "‍"                  # zero-width joiner
+    "︎️"            # variation selectors (text/emoji presentation)
+    "⃣"                  # combining enclosing keycap
+    "\U0001F3FB-\U0001F3FF"   # skin-tone modifiers
+    "]+",
+    flags=re.UNICODE,
+)
+
+
+def _strip_blocklist(text: str, patterns: list[str], self_username: Optional[str] = None) -> str:
+    """Remove whole lines from `text` that match any blocklist pattern, plus
+    optionally any line that mentions the channel's own @username (typical
+    self-signature footer). Patterns starting with 're:' are treated as regex,
+    everything else is a case-insensitive substring match.
+    """
+    if not text:
+        return text
+    # Pre-compile patterns
+    compiled: list[re.Pattern] = []
+    for p in patterns or []:
+        if not p:
+            continue
+        if p.startswith("re:"):
+            try:
+                compiled.append(re.compile(p[3:], re.I))
+            except re.error:
+                log.warning("blocklist: invalid regex %r", p)
+                continue
+        else:
+            compiled.append(re.compile(re.escape(p), re.I))
+    # Self-signature pattern: line containing @<username> (whole word)
+    self_pat: Optional[re.Pattern] = None
+    if self_username:
+        un = self_username.lstrip("@").strip()
+        if un:
+            self_pat = re.compile(r"@\b" + re.escape(un) + r"\b", re.I)
+
+    def _line_blocked(line: str) -> bool:
+        if self_pat and self_pat.search(line):
+            return True
+        for pat in compiled:
+            if pat.search(line):
+                return True
+        return False
+
+    kept = [ln for ln in text.split("\n") if not _line_blocked(ln)]
+    # Collapse multiple blank lines that may result from removed lines
+    out_lines: list[str] = []
+    last_blank = False
+    for ln in kept:
+        is_blank = not ln.strip()
+        if is_blank and last_blank:
+            continue
+        out_lines.append(ln)
+        last_blank = is_blank
+    return "\n".join(out_lines).strip()
+
+
+_URL_RE = re.compile(r"https?://\S+|t\.me/\S+", re.I)
+_AT_RE = re.compile(r"(?<![A-Za-z0-9_])@[A-Za-z][\w]{2,}")
+
+
+def _count_urls(text: str) -> int:
+    return len(_URL_RE.findall(text or ""))
+
+
+def _count_at_mentions(text: str) -> int:
+    return len(_AT_RE.findall(text or ""))
+
+
+def _keep_first_paragraphs(text: str, n: int) -> str:
+    """Slice the body to the first n paragraphs (paragraphs separated by a
+    blank line, i.e. `\\n\\n`). n <= 0 means no slicing."""
+    if not text or n <= 0:
+        return text
+    # Normalise: collapse runs of blank lines, then split.
+    parts = re.split(r"\n\s*\n", text.strip(), maxsplit=n)
+    # `re.split` with maxsplit gives at most n+1 pieces; keep the first n
+    # and discard the rest.
+    return "\n\n".join(parts[:n]).strip()
+
+
+def _spam_reason(text: str, max_ats: int, max_urls: int) -> Optional[str]:
+    """Returns a short reason if the message should be dropped, or None."""
+    if max_ats and max_ats > 0:
+        cnt = _count_at_mentions(text)
+        if cnt > max_ats:
+            return f"много @упоминаний ({cnt} > {max_ats})"
+    if max_urls and max_urls > 0:
+        cnt = _count_urls(text)
+        if cnt > max_urls:
+            return f"много ссылок ({cnt} > {max_urls})"
+    return None
+
+
+def _build_mesh_text(prefix: str, src_name: str, body: str, include_source: bool) -> str:
+    """Compose the final outgoing mesh text from the configurable header parts.
+
+    Examples (with body="foo"):
+      prefix="🚨 TG", src="@x", include=True  → "🚨 TG · @x\nfoo"
+      prefix="🚨 TG", src="@x", include=False → "🚨 TG\nfoo"
+      prefix="",      src="@x", include=True  → "@x\nfoo"
+      prefix="",      src="@x", include=False → "foo"
+    """
+    parts: list[str] = []
+    if prefix:
+        parts.append(prefix.strip())
+    if include_source and src_name:
+        parts.append(src_name.strip())
+    header = " · ".join(p for p in parts if p)
+    return f"{header}\n{body}" if header else body
+
+
+def _strip_emoji(text: str) -> str:
+    """Remove emoji & pictographs from text; collapse the resulting whitespace."""
+    if not text:
+        return text
+    text = _EMOJI_RE.sub("", text)
+    # Cleanup: emojis often had a separating space — squash runs of spaces.
+    text = re.sub(r"[ \t]{2,}", " ", text)
+    # Trim spaces at line edges that the strip may have left behind.
+    text = re.sub(r"[ \t]+\n", "\n", text)
+    text = re.sub(r"\n[ \t]+", "\n", text)
+    # No more than two consecutive newlines.
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
 class TelegramBridge:
     def __init__(self, session_path: Path, mesh_send_callback: Callable[[str, int, str], None]):
         """
@@ -166,6 +343,10 @@ class TelegramBridge:
         self._cfg_lock = threading.Lock()
         self._last_fwd: dict[str, float] = {}   # per-channel dedup
         self._history: collections.deque[dict] = collections.deque(maxlen=50)
+        # Wider debug feed — EVERY parsed message with its match status. Lets
+        # the user verify the bridge actually sees channel messages even when
+        # filters reject them.
+        self._seen: collections.deque[dict] = collections.deque(maxlen=200)
         self._stop_event = threading.Event()
 
         # --- telethon-mode state ---
@@ -203,6 +384,25 @@ class TelegramBridge:
             if self._cfg.get("enabled"):
                 self.start()
 
+    def _record_seen(
+        self, channel: str, text: str,
+        status: str,   # "forwarded" | "throttled" | "no_keyword" | "no_geo" | "test"
+        keyword: Optional[str] = None,
+        geo: Optional[str] = None,
+    ) -> None:
+        """Push an entry into the debug feed — every parsed message, regardless of match."""
+        preview = (text or "").replace("\n", " ").strip()
+        if len(preview) > 220:
+            preview = preview[:217] + "…"
+        self._seen.appendleft({
+            "ts": int(time.time()),
+            "channel": channel,
+            "text": preview,
+            "status": status,
+            "keyword": keyword,
+            "geo": geo,
+        })
+
     def status(self) -> dict[str, Any]:
         with self._cfg_lock:
             cfg = dict(self._cfg)
@@ -222,9 +422,18 @@ class TelegramBridge:
                 "poll_interval_seconds": cfg.get("poll_interval_seconds"),
                 "forward_prefix": cfg.get("forward_prefix"),
                 "proxy": cfg.get("proxy") or "",
+                "strip_emoji": bool(cfg.get("strip_emoji", True)),
+                "include_source": bool(cfg.get("include_source", True)),
+                "blocklist_lines": list(cfg.get("blocklist_lines") or []),
+                "strip_self_signature": bool(cfg.get("strip_self_signature", True)),
+                "max_message_chars": int(cfg.get("max_message_chars") or 0),
+                "max_at_mentions": int(cfg.get("max_at_mentions") or 0),
+                "max_urls": int(cfg.get("max_urls") or 0),
+                "keep_first_paragraphs": int(cfg.get("keep_first_paragraphs") or 0),
             },
             "session_exists": self._session_path.exists(),
             "recent_matches": list(self._history),
+            "recent_seen": list(self._seen),
         }
 
     def start(self) -> dict[str, Any]:
@@ -316,6 +525,14 @@ class TelegramBridge:
                 prefix = cfg.get("forward_prefix") or "🚨 TG"
                 broadcast_to = cfg.get("broadcast_to") or "broadcast"
                 channel_idx = int(cfg.get("channel_index") or 0)
+                strip_emoji = bool(cfg.get("strip_emoji", True))
+                include_source = bool(cfg.get("include_source", True))
+                blocklist = list(cfg.get("blocklist_lines") or [])
+                strip_self_sig = bool(cfg.get("strip_self_signature", True))
+                max_chars = int(cfg.get("max_message_chars") or 0)
+                max_ats = int(cfg.get("max_at_mentions") or 0)
+                max_urls = int(cfg.get("max_urls") or 0)
+                keep_paras = int(cfg.get("keep_first_paragraphs") or 0)
 
                 for ch in channels:
                     if self._stop_event.is_set():
@@ -323,7 +540,9 @@ class TelegramBridge:
                     try:
                         self._poll_channel_web(
                             ch, keywords, geo_filter, prefix, broadcast_to,
-                            channel_idx, min_iv, first_pass,
+                            channel_idx, min_iv, first_pass, strip_emoji,
+                            include_source, blocklist, strip_self_sig,
+                            max_chars, max_ats, max_urls, keep_paras,
                         )
                     except Exception:
                         log.exception("Web-poll failed for %r", ch)
@@ -338,7 +557,14 @@ class TelegramBridge:
     def _poll_channel_web(
         self, channel_name: str, keywords: list[str], geo_filter: list[str],
         prefix: str, broadcast_to: str, channel_idx: int,
-        min_iv: float, first_pass: bool,
+        min_iv: float, first_pass: bool, strip_emoji: bool = True,
+        include_source: bool = True,
+        blocklist: list[str] | None = None,
+        strip_self_sig: bool = True,
+        max_chars: int = 500,
+        max_ats: int = 5,
+        max_urls: int = 3,
+        keep_paras: int = 0,
     ) -> None:
         """Fetch one channel's preview page and process new messages."""
         ch = channel_name.lstrip("@").strip()
@@ -367,11 +593,10 @@ class TelegramBridge:
             log.warning("Failed to fetch %s — %s", url, exc)
             return
 
-        # Resolve a friendly channel title for the mesh message
-        title_m = _TITLE_RE.search(html)
-        src_name = (
-            _strip_tags(title_m.group(1)) if title_m else f"@{ch}"
-        ) or f"@{ch}"
+        # Use the @username as the source name — short, unambiguous, and saves
+        # bytes on the LoRa packet (vs. the channel's display title which often
+        # has emojis/decorations).
+        src_name = f"@{ch}"
 
         # Find all message blocks; iterate oldest → newest (t.me preview is
         # listed bottom-up in the DOM, but iterating in match order is fine
@@ -410,11 +635,14 @@ class TelegramBridge:
             tl = text.lower()
             matched_kw = next((k for k in keywords if k in tl), None) if keywords else "*"
             if not matched_kw:
+                self._record_seen(src_name, text, "no_keyword")
                 continue
             # Geo filter: if defined, at least one geo term must also be in the text
+            matched_geo = None
             if geo_filter:
                 matched_geo = next((g for g in geo_filter if g in tl), None)
                 if not matched_geo:
+                    self._record_seen(src_name, text, "no_geo", keyword=matched_kw)
                     log.debug("TG[web] %s — keyword %r matched but geo filter skipped",
                               channel_name, matched_kw)
                     continue
@@ -428,8 +656,31 @@ class TelegramBridge:
             if not throttled:
                 self._last_fwd[key] = now
 
-            snippet = text if len(text) <= 600 else text[:597] + "…"
-            mesh_text = f"{prefix} · {src_name}\n{snippet}"
+            body = _strip_emoji(text) if strip_emoji else text
+            # Strip ad lines and (optionally) the channel's own self-signature
+            body = _strip_blocklist(
+                body,
+                blocklist or [],
+                self_username=(ch if strip_self_sig else None),
+            )
+            # Anti-spam: hard-drop messages with too many @-mentions / URLs.
+            spam_why = _spam_reason(body, max_ats, max_urls)
+            if spam_why:
+                self._record_seen(
+                    src_name, text, "spam_filter",
+                    keyword=matched_kw, geo=matched_geo,
+                )
+                log.info("TG[web] %s — dropped as spam: %s", src_name, spam_why)
+                continue
+            # Slice to first N paragraphs (keep the alert, drop the long tail)
+            body = _keep_first_paragraphs(body, keep_paras)
+            # If stripping wiped the whole message (was emoji+ad-only) — skip
+            if not body:
+                continue
+            # Hard length cap
+            cap = max_chars if max_chars and max_chars > 0 else 600
+            snippet = body if len(body) <= cap else body[:max(cap - 3, 0)] + "…"
+            mesh_text = _build_mesh_text(prefix, src_name, snippet, include_source)
             entry = {
                 "ts": int(now),
                 "channel": src_name,
@@ -446,6 +697,11 @@ class TelegramBridge:
                     log.info("TG[web] → mesh: %s · %r", src_name, snippet[:60])
                 except Exception:
                     log.exception("Failed to forward TG[web] message to mesh")
+            self._record_seen(
+                src_name, text,
+                "throttled" if throttled else "forwarded",
+                keyword=matched_kw, geo=matched_geo,
+            )
 
     # ------------------------------------------------------------------
     # Mode: TELETHON (MTProto, requires api_id / api_hash / session)
@@ -541,6 +797,14 @@ class TelegramBridge:
         prefix = cfg.get("forward_prefix") or "🚨 TG"
         broadcast_to = cfg.get("broadcast_to") or "broadcast"
         channel_idx = int(cfg.get("channel_index") or 0)
+        strip_emoji_flag = bool(cfg.get("strip_emoji", True))
+        include_source_flag = bool(cfg.get("include_source", True))
+        blocklist_flag = list(cfg.get("blocklist_lines") or [])
+        strip_self_sig_flag = bool(cfg.get("strip_self_signature", True))
+        max_chars_flag = int(cfg.get("max_message_chars") or 0)
+        max_ats_flag = int(cfg.get("max_at_mentions") or 0)
+        max_urls_flag = int(cfg.get("max_urls") or 0)
+        keep_paras_flag = int(cfg.get("keep_first_paragraphs") or 0)
 
         @self._client.on(events.NewMessage(chats=resolved))
         async def _handler(event):
@@ -549,31 +813,52 @@ class TelegramBridge:
                 if not text:
                     return
                 tl = text.lower()
-                matched = next((k for k in keywords if k in tl), None) if keywords else "*"
-                if not matched:
-                    return
-                if geo_filter:
-                    matched_geo = next((g for g in geo_filter if g in tl), None)
-                    if not matched_geo:
-                        return
-                    matched = f"{matched} · {matched_geo}"
+                # Resolve a source name first — used by debug records too.
                 try:
                     chat = await event.get_chat()
+                    username = getattr(chat, "username", None)
                     src_name = (
-                        getattr(chat, "title", None)
-                        or getattr(chat, "username", None)
+                        f"@{username}" if username
+                        else getattr(chat, "title", None)
                         or str(getattr(chat, "id", "?"))
                     )
                 except Exception:
                     src_name = "?"
+                matched = next((k for k in keywords if k in tl), None) if keywords else "*"
+                if not matched:
+                    self._record_seen(src_name, text, "no_keyword")
+                    return
+                matched_geo = None
+                if geo_filter:
+                    matched_geo = next((g for g in geo_filter if g in tl), None)
+                    if not matched_geo:
+                        self._record_seen(src_name, text, "no_geo", keyword=matched)
+                        return
+                    matched = f"{matched} · {matched_geo}"
                 key = str(src_name)
                 now = time.time()
                 last = self._last_fwd.get(key, 0)
                 throttled = (now - last) < min_iv
                 if not throttled:
                     self._last_fwd[key] = now
-                snippet = text if len(text) <= 600 else text[:597] + "…"
-                mesh_text = f"{prefix} · {src_name}\n{snippet}"
+                body = _strip_emoji(text) if strip_emoji_flag else text
+                # Strip blocklist + channel's own @username footer
+                tg_self = username if strip_self_sig_flag else None
+                body = _strip_blocklist(body, blocklist_flag, self_username=tg_self)
+                spam_why = _spam_reason(body, max_ats_flag, max_urls_flag)
+                if spam_why:
+                    self._record_seen(
+                        src_name, text, "spam_filter",
+                        keyword=matched, geo=matched_geo,
+                    )
+                    log.info("TG[telethon] %s — dropped as spam: %s", src_name, spam_why)
+                    return
+                body = _keep_first_paragraphs(body, keep_paras_flag)
+                if not body:
+                    return
+                cap = max_chars_flag if max_chars_flag and max_chars_flag > 0 else 600
+                snippet = body if len(body) <= cap else body[:max(cap - 3, 0)] + "…"
+                mesh_text = _build_mesh_text(prefix, src_name, snippet, include_source_flag)
                 entry = {
                     "ts": int(now),
                     "channel": src_name,
@@ -589,6 +874,11 @@ class TelegramBridge:
                         self._mesh_send(mesh_text, channel_idx, broadcast_to)
                     except Exception:
                         log.exception("Failed to forward TG[telethon] message to mesh")
+                self._record_seen(
+                    src_name, text,
+                    "throttled" if throttled else "forwarded",
+                    keyword=matched, geo=matched_geo,
+                )
             except Exception:
                 log.exception("Telegram telethon handler crashed")
 
@@ -627,6 +917,7 @@ class TelegramBridge:
             "keyword": "test",
             "throttled": False,
         })
+        self._record_seen("[TEST]", text, "test", keyword="test")
         return {
             "ok": True,
             "text": text,

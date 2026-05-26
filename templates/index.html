@@ -49,6 +49,27 @@
   <main>
     <!-- =================== HOME TAB =================== -->
     <div class="tab-panel active" data-tab="home">
+      <section class="card weather-widget-card" id="weatherWidget">
+        <div class="ww-head">
+          <h2>🌤 Погода сейчас</h2>
+          <span class="ww-city muted" id="wwCity">—</span>
+        </div>
+        <div class="ww-body" id="wwBody">
+          <div class="muted">Загружаю прогноз…</div>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>📈 Почасовой прогноз (24ч)</h2>
+        <div id="hourlyChart" class="hourly-chart-wrap">
+          <div class="muted">Загружаю график…</div>
+        </div>
+        <div class="hourly-legend muted">
+          <span class="hl-line"></span> температура °C &nbsp;·&nbsp;
+          <span class="hl-bar"></span> вероятность осадков %
+        </div>
+      </section>
+
       <section class="card">
         <h2>📡 Состояние</h2>
         <div class="stats-grid">
@@ -133,7 +154,15 @@
         <div id="map" class="map-container"></div>
         <div class="muted map-foot">
           <span id="mapInfo">…</span>
-          <button id="mapRefresh" class="ghost">Обновить</button>
+          <span class="map-foot-controls">
+            <label class="toggle-row" style="margin: 0; padding: 4px 8px;">
+              <input type="checkbox" id="radarEnabled">
+              <span>🌧 Радар осадков</span>
+            </label>
+            <button id="radarPlay" class="ghost" hidden title="Запустить анимацию">▶</button>
+            <span id="radarTime" class="muted" hidden></span>
+            <button id="mapRefresh" class="ghost">Обновить</button>
+          </span>
         </div>
       </section>
     </div>
@@ -231,6 +260,14 @@
           <input type="checkbox" id="alertsThunderstorm">
           <span>Гроза (по текущей погоде)</span>
         </label>
+        <label class="toggle-row">
+          <input type="checkbox" id="alertsFog">
+          <span>Туман (по WMO-коду или видимости ниже порога)</span>
+        </label>
+        <label class="toggle-row">
+          <input type="checkbox" id="alertsIce">
+          <span>Гололёд (ледяной дождь / осадки при 0°C / перепад через 0°C)</span>
+        </label>
         <div class="grid2">
           <label>Сильный ветер от, м/с
             <input type="number" id="alertsWind" min="5" max="40" step="1">
@@ -243,6 +280,9 @@
           </label>
           <label>Жара от, °C
             <input type="number" id="alertsHeat" min="20" max="50" step="1">
+          </label>
+          <label>Туман от видимости ниже, м
+            <input type="number" id="alertsFogVisibility" min="50" max="2000" step="50">
           </label>
           <label>Интервал проверки, мин
             <input type="number" id="alertsInterval" min="2" max="120" step="1">
@@ -312,8 +352,17 @@
             <input type="checkbox" id="notifEnabled">
             <span>Уведомления</span>
           </label>
+          <label class="toggle-row">
+            <input type="checkbox" id="soundEnabled">
+            <span>🔊 Звук</span>
+          </label>
           <button id="notifPermBtn" class="ghost" hidden>Запросить разрешение</button>
+          <button id="soundTestBtn" class="ghost" title="Проиграть тестовый звук">▶</button>
           <span id="notifStatus" class="muted"></span>
+          <span class="chat-search-row">
+            <input type="text" id="chatSearchInput" placeholder="🔎 Поиск в чате…">
+            <button id="chatSearchClear" class="ghost" hidden title="Сбросить поиск">✕</button>
+          </span>
         </div>
 
         <div class="chat-layout" id="chatLayout">
@@ -356,6 +405,32 @@
         <p class="hint">
           Фичи в разработке. Включай только то, что понимаешь — оно может ломаться, есть лишние зависимости и т.п.
         </p>
+
+        <!-- ===== Auto-update ===== -->
+        <details class="experiment" id="experimentUpdate">
+          <summary>
+            <span><strong>🔄 Обновление из git</strong> — подтянуть свежий код с GitHub</span>
+          </summary>
+          <div class="experiment-body">
+            <p class="hint">
+              Тянет последнюю версию бота из git-репозитория. Если изменился <code>requirements.txt</code> — переустанавливает зависимости.
+              Опционально перезапускает сам сервис (нужен systemd с <code>Restart=on-failure</code> или <code>always</code>).
+            </p>
+            <div class="tg-status" id="updStatus">
+              <span class="tg-dot tg-dot-idle"></span>
+              <span id="updStatusText">Загружаю инфо…</span>
+            </div>
+            <div class="row">
+              <button id="updRefresh" class="ghost">↻ Проверить обновления</button>
+              <button id="updPull" class="primary">📥 Обновить</button>
+              <label class="toggle-row" style="margin-left: auto;">
+                <input type="checkbox" id="updRestart" checked>
+                <span>Перезапустить сервис после обновления</span>
+              </label>
+            </div>
+            <pre id="updLog" class="preview" style="margin-top: 12px; max-height: 240px; overflow-y: auto;"></pre>
+          </div>
+        </details>
 
         <!-- ===== Telegram bridge ===== -->
         <details class="experiment" id="experimentTg">
@@ -471,6 +546,50 @@
               </label>
             </div>
 
+            <label class="toggle-row">
+              <input type="checkbox" id="tgStripEmoji" checked>
+              <span><strong>Убирать эмодзи</strong> из пересылаемых сообщений (экономит до ~50% места в LoRa-пакете)</span>
+            </label>
+            <label class="toggle-row">
+              <input type="checkbox" id="tgIncludeSource" checked>
+              <span><strong>Включать имя канала (@username)</strong> в заголовок сообщения. Сними галку — будет только текст без указания источника.</span>
+            </label>
+            <label class="toggle-row">
+              <input type="checkbox" id="tgStripSelfSig" checked>
+              <span><strong>Удалять самоподпись канала</strong> — строки типа «Радар Чувашия — @radar_chuvashiya» (где упомянут собственный username канала)</span>
+            </label>
+            <p class="hint" style="margin-top: 6px;">
+              📦 <strong>Хочешь супер-короткое сообщение?</strong> Очисти поле «Префикс в mesh-сообщении» (станет: <code>@username\n&lt;текст&gt;</code>),
+              а если ещё и снять галку выше — пойдёт только сам текст без всякой обвязки.
+            </p>
+
+            <div class="profile-section">Чёрный список фраз <small>(удаляются полные строки)</small></div>
+            <p class="hint">
+              По одной фразе в строке. Если в сообщении найдётся хотя бы одна — вся строка вычищается из mesh-пакета.
+              Регистр не важен. Для регулярных выражений начни строку с <code>re:</code>.<br>
+              Примеры: <code>Обход белых списков</code>, <code>@Internet_Boost_bot</code>, <code>Подписаться:</code>, <code>re:наш\s+(чат|тг|канал)</code>
+            </p>
+            <textarea id="tgBlocklist" rows="4" placeholder="Обход белых списков&#10;@Internet_Boost_bot&#10;Подписаться:" class="tg-textarea"></textarea>
+
+            <div class="profile-section">Защита от спама <small>(промо-постов в формате «алерта»)</small></div>
+            <p class="hint">
+              Каналы любят прятать рекламу/призывы в посты-«алерты» (типа «ТРЕВОГА» + список 80 городов с @username). Эти лимиты сразу режут такое.
+            </p>
+            <div class="grid2">
+              <label>Макс. длина сообщения, симв <small>(0 = без лимита)</small>
+                <input type="number" id="tgMaxChars" min="0" max="2000" step="50" value="500">
+              </label>
+              <label>Оставить только первые N абзацев <small>(0 = все)</small>
+                <input type="number" id="tgKeepParas" min="0" max="20" step="1" value="0">
+              </label>
+              <label>Макс. @упоминаний в сообщении <small>(0 = без лимита)</small>
+                <input type="number" id="tgMaxAts" min="0" max="50" step="1" value="5">
+              </label>
+              <label>Макс. ссылок в сообщении <small>(0 = без лимита)</small>
+                <input type="number" id="tgMaxUrls" min="0" max="50" step="1" value="3">
+              </label>
+            </div>
+
             <div class="row">
               <button id="tgSave">💾 Сохранить</button>
               <button id="tgStart" class="primary">▶ Запустить мост</button>
@@ -483,6 +602,30 @@
             <div id="tgHistory" class="tg-history">
               <div class="muted">Ничего пока не было.</div>
             </div>
+
+            <details class="tg-seen-block">
+              <summary>
+                <span><strong>🔬 Все увиденные сообщения (отладка)</strong> — пропущенные тоже</span>
+              </summary>
+              <p class="hint">
+                Сюда падает каждое сообщение, которое бот видит на канале — даже если фильтр его отбраковал.
+                Если канал постит, а тут пусто — значит бот канал не видит (прокси/сеть/невалидный @username).
+              </p>
+              <div class="tg-seen-controls">
+                <select id="tgSeenFilter">
+                  <option value="all">Все</option>
+                  <option value="forwarded">✅ Отправлены</option>
+                  <option value="throttled">⏸ Задросселлены</option>
+                  <option value="no_keyword">⊘ Нет ключевого слова</option>
+                  <option value="no_geo">📍 Не прошёл гео</option>
+                  <option value="spam_filter">🛑 Спам-фильтр</option>
+                </select>
+                <span class="muted" id="tgSeenStats">—</span>
+              </div>
+              <div id="tgSeen" class="tg-seen">
+                <div class="muted">Пока ничего не приходило. Подожди опроса каналов (60 сек по умолчанию).</div>
+              </div>
+            </details>
           </div>
         </details>
       </section>

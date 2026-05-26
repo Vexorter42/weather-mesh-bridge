@@ -97,6 +97,7 @@ $$(".tab-btn").forEach(btn => {
       refreshMap();
     } else if (CURRENT_TAB === "misc") {
       refreshTelegramStatus();
+      refreshUpdateInfo();
     }
   });
 });
@@ -106,14 +107,18 @@ let KNOWN_NODES = [];     // last fetched node list (for DM picker)
 
 async function refreshDashboard() {
   try {
-    const [stats, nodes, channels] = await Promise.all([
+    const [stats, nodes, channels, wxCur, wxHourly] = await Promise.all([
       api("/api/stats"),
       api("/api/nodes").catch(() => []),
       api("/api/channels").catch(() => []),
+      api("/api/weather/current").catch(() => null),
+      api("/api/weather/hourly").catch(() => null),
     ]);
     KNOWN_NODES = Array.isArray(nodes) ? nodes : [];
     KNOWN_CHANNELS = Array.isArray(channels) ? channels : [];
     renderDashboard(stats, KNOWN_NODES);
+    renderWeatherWidget(wxCur);
+    renderHourlyChart(wxHourly);
     populateDestinationSelectors(KNOWN_NODES);
     populateTgChannelSelect();
     rebuildConversations();
@@ -162,6 +167,184 @@ function renderDashboard(s, nodes) {
     row.addEventListener("click", () => openNodeProfile(n.node_id));
     wrap.appendChild(row);
   }
+}
+
+// ---------- Weather widget + hourly chart ----------
+
+function renderWeatherWidget(w) {
+  const body = $("#wwBody");
+  const cityEl = $("#wwCity");
+  if (!body) return;
+  if (!w || w.error) {
+    body.innerHTML = `<div class="muted">${escapeHtml((w && w.error) || "Нет данных. Выбери город в настройках.")}</div>`;
+    if (cityEl) cityEl.textContent = "";
+    return;
+  }
+  if (cityEl) cityEl.textContent = w.city || "";
+  const temp = (w.temperature_c != null) ? `${w.temperature_c > 0 ? "+" : ""}${w.temperature_c.toFixed(1)}°C` : "—";
+  const feels = (w.feels_like_c != null) ? `${w.feels_like_c > 0 ? "+" : ""}${w.feels_like_c.toFixed(0)}°` : "—";
+  const minmax = (w.today_min != null && w.today_max != null)
+    ? `${w.today_min > 0 ? "+" : ""}${Math.round(w.today_min)}…${w.today_max > 0 ? "+" : ""}${Math.round(w.today_max)}°`
+    : "—";
+  const wind = (w.wind_speed_ms != null)
+    ? `${w.wind_speed_ms.toFixed(1)} м/с${w.wind_direction ? " " + w.wind_direction : ""}${w.wind_gusts_ms ? " (порывы " + Math.round(w.wind_gusts_ms) + ")" : ""}`
+    : "—";
+  const hum = (w.humidity != null) ? `${Math.round(w.humidity)}%` : "—";
+  const press = (w.pressure_mmhg != null) ? `${w.pressure_mmhg} мм рт.ст.` : "—";
+  const precip = (w.precipitation_mm != null && w.precipitation_mm > 0) ? `${w.precipitation_mm} мм` : "—";
+
+  body.innerHTML = `
+    <div class="ww-main">
+      <div class="ww-temp">${escapeHtml(temp)}</div>
+      <div class="ww-cond">
+        <div class="ww-emoji">${w.condition_emoji || (w.is_day ? "☀️" : "🌙")}</div>
+        <div class="ww-cond-text">${escapeHtml(w.condition_text || "—")}</div>
+        <div class="ww-feels muted">ощущается ${escapeHtml(feels)} · ${escapeHtml(minmax)} сегодня</div>
+      </div>
+    </div>
+    <div class="ww-grid">
+      <div class="ww-item"><span class="muted">💨 ветер</span><strong>${escapeHtml(wind)}</strong></div>
+      <div class="ww-item"><span class="muted">💧 влажность</span><strong>${escapeHtml(hum)}</strong></div>
+      <div class="ww-item"><span class="muted">⏲ давление</span><strong>${escapeHtml(press)}</strong></div>
+      <div class="ww-item"><span class="muted">🌧 осадки</span><strong>${escapeHtml(precip)}</strong></div>
+    </div>
+  `;
+}
+
+function renderHourlyChart(h) {
+  const wrap = $("#hourlyChart");
+  if (!wrap) return;
+  if (!h || h.error || !h.time || !h.time.length) {
+    wrap.innerHTML = `<div class="muted">${escapeHtml((h && h.error) || "Нет данных.")}</div>`;
+    return;
+  }
+  const temps = h.temperature_2m.map(v => v == null ? null : Number(v));
+  const probs = (h.precipitation_probability || []).map(v => v == null ? 0 : Number(v));
+  const hums  = (h.relative_humidity_2m   || []).map(v => v == null ? null : Number(v));
+  const winds = (h.wind_speed_10m         || []).map(v => v == null ? null : Number(v));
+  const times = h.time.map(t => t.slice(11, 16));   // "HH:MM"
+
+  const n = temps.length;
+  if (!n) { wrap.innerHTML = `<div class="muted">Нет данных.</div>`; return; }
+
+  // Layout
+  const W = 760, H = 200;
+  const P = { l: 36, r: 16, t: 18, b: 32 };
+  const cw = W - P.l - P.r;
+  const ch = H - P.t - P.b;
+
+  const validTemps = temps.filter(v => v != null);
+  const tMin = Math.min(...validTemps) - 1;
+  const tMax = Math.max(...validTemps) + 1;
+  const tRange = (tMax - tMin) || 1;
+
+  const x = i => P.l + (i / (n - 1 || 1)) * cw;
+  const yT = t => P.t + ch - ((t - tMin) / tRange) * ch;
+
+  // Precip bars (probability 0..100)
+  const barW = Math.max(2, cw / n * 0.55);
+  const colW = cw / Math.max(n - 1, 1);
+  const bars = probs.map((p, i) => {
+    const h2 = (p / 100) * ch;
+    return `<rect x="${x(i) - barW/2}" y="${P.t + ch - h2}" width="${barW}" height="${h2}" rx="2" fill="rgba(106,163,255,0.35)"/>`;
+  }).join("");
+
+  // Temperature polyline
+  const points = temps.map((t, i) => t == null ? null : `${x(i)},${yT(t)}`).filter(Boolean).join(" ");
+
+  // Y-axis ticks (temp)
+  const tTicks = [tMin, (tMin+tMax)/2, tMax].map(v => {
+    return `<g class="hc-tick">
+      <text x="${P.l - 6}" y="${yT(v) + 4}" text-anchor="end">${(v > 0 ? "+" : "") + v.toFixed(0)}°</text>
+      <line x1="${P.l}" x2="${P.l + cw}" y1="${yT(v)}" y2="${yT(v)}" stroke="rgba(255,255,255,0.07)"/>
+    </g>`;
+  }).join("");
+
+  // X-axis labels every 3-4 hours
+  const step = Math.max(1, Math.floor(n / 8));
+  const xTicks = times.map((t, i) => i % step === 0
+    ? `<text x="${x(i)}" y="${H - 8}" text-anchor="middle" class="hc-tick">${t}</text>` : "").join("");
+
+  // Invisible hit areas covering each hour column (full chart height) — they
+  // catch mouse events for the custom tooltip. Wider than the visible bar so
+  // hover is forgiving.
+  const hitW = Math.max(barW + 4, colW);
+  const hits = temps.map((_, i) =>
+    `<rect class="hc-hit" data-idx="${i}" x="${x(i) - hitW/2}" y="${P.t}" width="${hitW}" height="${ch}" fill="transparent" pointer-events="all"/>`
+  ).join("");
+
+  wrap.innerHTML = `
+    <svg viewBox="0 0 ${W} ${H}" class="hourly-svg" preserveAspectRatio="xMidYMid meet">
+      ${tTicks}
+      ${bars}
+      <polyline fill="none" stroke="url(#hcGrad)" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" points="${points}"/>
+      ${temps.map((t, i) => t == null ? "" :
+        `<circle class="hc-dot" data-idx="${i}" cx="${x(i)}" cy="${yT(t)}" r="2.5" fill="#fff"/>`).join("")}
+      <line id="hcCursor" x1="0" x2="0" y1="${P.t}" y2="${P.t + ch}" stroke="rgba(255,255,255,0.25)" stroke-dasharray="3,3" style="display:none"/>
+      ${hits}
+      ${xTicks}
+      <defs>
+        <linearGradient id="hcGrad" x1="0" y1="0" x2="1" y2="0">
+          <stop offset="0%" stop-color="#8b9eff"/>
+          <stop offset="50%" stop-color="#d77bff"/>
+          <stop offset="100%" stop-color="#4dd0e1"/>
+        </linearGradient>
+      </defs>
+    </svg>
+    <div class="hc-tooltip" hidden></div>
+  `;
+
+  // ----- Wire up the custom tooltip -----
+  const svg = wrap.querySelector("svg");
+  const tip = wrap.querySelector(".hc-tooltip");
+  const cursor = wrap.querySelector("#hcCursor");
+
+  function showTipFor(idx, clientX) {
+    const t  = temps[idx];
+    const pp = probs[idx];
+    const hm = hums[idx];
+    const ws = winds[idx];
+    const parts = [`<div class="hc-tt-time">${times[idx]}</div>`];
+    if (t != null)  parts.push(`<div>🌡 <strong>${(t > 0 ? "+" : "")}${t.toFixed(1)}°C</strong></div>`);
+    if (hm != null) parts.push(`<div>💧 ${Math.round(hm)}%</div>`);
+    if (pp != null) parts.push(`<div>🌧 ${Math.round(pp)}%</div>`);
+    if (ws != null) parts.push(`<div>💨 ${ws.toFixed(1)} м/с</div>`);
+    tip.innerHTML = parts.join("");
+    tip.hidden = false;
+
+    // Position tooltip — translate SVG x-coord into wrap-relative px.
+    const svgBox = svg.getBoundingClientRect();
+    const wrapBox = wrap.getBoundingClientRect();
+    const xRatio = svgBox.width / W;
+    const cxPx = (x(idx)) * xRatio + (svgBox.left - wrapBox.left);
+    // Place tooltip above the temp dot, clamp to wrap bounds.
+    const ttW = tip.offsetWidth || 130;
+    let left = cxPx - ttW / 2;
+    left = Math.max(4, Math.min(left, wrapBox.width - ttW - 4));
+    tip.style.left = `${left}px`;
+    tip.style.top = `4px`;
+
+    // Move vertical cursor line on SVG
+    cursor.setAttribute("x1", x(idx));
+    cursor.setAttribute("x2", x(idx));
+    cursor.style.display = "";
+  }
+
+  function hideTip() {
+    tip.hidden = true;
+    cursor.style.display = "none";
+  }
+
+  wrap.querySelectorAll(".hc-hit").forEach(r => {
+    r.addEventListener("mouseenter", e => showTipFor(+e.target.dataset.idx, e.clientX));
+    r.addEventListener("mousemove",  e => showTipFor(+e.target.dataset.idx, e.clientX));
+    r.addEventListener("mouseleave", hideTip);
+  });
+  // Touch — tap a column to pin tooltip; tap outside to hide.
+  wrap.addEventListener("touchstart", e => {
+    const t = e.target.closest(".hc-hit");
+    if (t) showTipFor(+t.dataset.idx, e.touches[0].clientX);
+  }, { passive: true });
 }
 
 function populateDestinationSelectors(nodes) {
@@ -342,7 +525,7 @@ function openNodeProfile(nodeId) {
   $("#profileTrace").onclick = async () => {
     const out = $("#tracerouteResult");
     out.hidden = false;
-    out.innerHTML = `<div class="muted">📡 Шлю traceroute, жду ответа (до 30 сек)…</div>`;
+    out.innerHTML = `<div class="muted">📡 Шлю traceroute, жду ответа (до 1 мин)…</div>`;
     const btn = $("#profileTrace");
     btn.disabled = true;
     const origText = btn.textContent;
@@ -350,7 +533,7 @@ function openNodeProfile(nodeId) {
     try {
       const r = await api("/api/mesh/traceroute", {
         method: "POST",
-        body: { destination: nodeId, hop_limit: 5, timeout: 30 },
+        body: { destination: nodeId, hop_limit: 5, timeout: 60 },
       });
       renderTracerouteResult(out, r, nodeId, n);
     } catch (e) {
@@ -747,6 +930,84 @@ async function refreshMap() {
 
 document.getElementById("mapRefresh")?.addEventListener("click", refreshMap);
 
+// ---------- RainViewer radar overlay ----------
+// API: https://api.rainviewer.com/public/weather-maps.json — free, no API key.
+// Returns past+nowcast radar tile URLs, served as XYZ tiles.
+
+let RADAR_FRAMES = [];     // [{ path, time }] — past + nowcast frames
+let RADAR_LAYER = null;    // currently shown Leaflet TileLayer
+let RADAR_INDEX = 0;       // current frame index in RADAR_FRAMES
+let RADAR_TIMER = null;    // animation interval
+
+async function loadRadarFrames() {
+  try {
+    const r = await fetch("https://api.rainviewer.com/public/weather-maps.json");
+    const data = await r.json();
+    const past = data.radar?.past || [];
+    const nowcast = data.radar?.nowcast || [];
+    RADAR_FRAMES = past.concat(nowcast);
+    RADAR_INDEX = past.length - 1;   // start at "now"
+    return true;
+  } catch (e) {
+    toast("Не удалось загрузить радар RainViewer: " + e.message, "err");
+    return false;
+  }
+}
+
+function showRadarFrame(idx) {
+  if (!MAP || !RADAR_FRAMES[idx]) return;
+  if (RADAR_LAYER) MAP.removeLayer(RADAR_LAYER);
+  const f = RADAR_FRAMES[idx];
+  // tile path is like "/v2/radar/1700000000" — base host is in the API response,
+  // but the static one https://tilecache.rainviewer.com works.
+  const url = `https://tilecache.rainviewer.com${f.path}/256/{z}/{x}/{y}/2/1_1.png`;
+  RADAR_LAYER = L.tileLayer(url, { opacity: 0.6, tileSize: 256, zIndex: 100 }).addTo(MAP);
+  RADAR_INDEX = idx;
+  const tEl = $("#radarTime");
+  if (tEl) {
+    tEl.hidden = false;
+    const d = new Date(f.time * 1000);
+    const isPast = idx < (RADAR_FRAMES.length - 3);   // nowcast frames are the last few
+    tEl.textContent = (isPast ? "" : "🔮 ") + d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  }
+}
+
+async function enableRadar() {
+  if (!MAP) ensureMap();
+  if (!MAP) { toast("Карта не готова", "err"); return; }
+  if (!RADAR_FRAMES.length) {
+    if (!await loadRadarFrames()) return;
+  }
+  if (!RADAR_FRAMES.length) return;
+  $("#radarPlay").hidden = false;
+  showRadarFrame(RADAR_INDEX);
+}
+
+function disableRadar() {
+  if (RADAR_LAYER) { MAP.removeLayer(RADAR_LAYER); RADAR_LAYER = null; }
+  if (RADAR_TIMER) { clearInterval(RADAR_TIMER); RADAR_TIMER = null; $("#radarPlay").textContent = "▶"; }
+  $("#radarPlay").hidden = true;
+  $("#radarTime").hidden = true;
+}
+
+function toggleRadarPlay() {
+  if (RADAR_TIMER) {
+    clearInterval(RADAR_TIMER); RADAR_TIMER = null;
+    $("#radarPlay").textContent = "▶";
+    return;
+  }
+  RADAR_TIMER = setInterval(() => {
+    const next = (RADAR_INDEX + 1) % RADAR_FRAMES.length;
+    showRadarFrame(next);
+  }, 600);
+  $("#radarPlay").textContent = "⏸";
+}
+
+document.getElementById("radarEnabled")?.addEventListener("change", (e) => {
+  if (e.target.checked) enableRadar(); else disableRadar();
+});
+document.getElementById("radarPlay")?.addEventListener("click", toggleRadarPlay);
+
 // ---------- Weather alerts ----------
 async function refreshAlertsUi() {
   try {
@@ -761,6 +1022,9 @@ async function refreshAlertsUi() {
     $("#alertsRain").value = a.rain_prob_threshold ?? 80;
     $("#alertsFrost").value = a.frost_threshold_c ?? -5;
     $("#alertsHeat").value = a.heat_threshold_c ?? 30;
+    $("#alertsFog").checked = a.fog_alerts !== false;
+    $("#alertsIce").checked = a.ice_alerts !== false;
+    $("#alertsFogVisibility").value = a.fog_visibility_m ?? 200;
     $("#alertsInterval").value = a.check_interval_minutes ?? 15;
 
     const last = status.last_check_ts;
@@ -789,6 +1053,9 @@ $("#alertsSave")?.addEventListener("click", async () => {
     rain_prob_threshold: parseInt($("#alertsRain").value, 10) || 80,
     frost_threshold_c: parseFloat($("#alertsFrost").value),
     heat_threshold_c: parseFloat($("#alertsHeat").value),
+    fog_alerts: $("#alertsFog").checked,
+    ice_alerts: $("#alertsIce").checked,
+    fog_visibility_m: parseInt($("#alertsFogVisibility").value, 10) || 200,
     check_interval_minutes: parseInt($("#alertsInterval").value, 10) || 15,
   };
   try {
@@ -1865,6 +2132,8 @@ function shouldNotify() {
 }
 
 function notifyIncoming(m) {
+  // Play sound regardless of OS notification permission (often denied on LAN)
+  if (soundPrefEnabled()) playNotificationSound(m.is_reaction ? "soft" : (isBroadcast(m) ? "ping" : "ding"));
   if (!shouldNotify()) return;
   try {
     const n = new Notification(`💬 ${m.from_name || "Mesh"}`, {
@@ -1880,6 +2149,108 @@ function notifyIncoming(m) {
       n.close();
     };
   } catch (e) { /* ignore */ }
+}
+
+// ---------- Chat search ----------
+
+let CHAT_SEARCH_MODE = false;
+
+async function runChatSearch(q) {
+  const log = $("#chatLog");
+  if (!log) return;
+  if (!q) {
+    CHAT_SEARCH_MODE = false;
+    renderChatLog();
+    return;
+  }
+  CHAT_SEARCH_MODE = true;
+  log.innerHTML = `<div class="chat-empty muted">🔎 Ищу «${escapeHtml(q)}»…</div>`;
+  try {
+    const r = await api(`/api/chat/search?q=${encodeURIComponent(q)}&limit=200`);
+    const msgs = r.messages || [];
+    if (!msgs.length) {
+      log.innerHTML = `<div class="chat-empty muted">Ничего не найдено по «${escapeHtml(q)}»</div>`;
+      return;
+    }
+    log.innerHTML = "";
+    const head = document.createElement("div");
+    head.className = "chat-empty muted";
+    head.style.padding = "8px 10px";
+    head.style.fontSize = "0.82rem";
+    head.innerHTML = `🔎 Найдено: <strong>${msgs.length}</strong> для «${escapeHtml(q)}»`;
+    log.appendChild(head);
+    const byMsgId = new Map();
+    const elements = new Map();
+    for (const m of msgs) {
+      if (m.msg_id) byMsgId.set(String(m.msg_id), m);
+    }
+    PENDING_REACTIONS.clear();
+    // Render newest first
+    for (const m of msgs) {
+      const el = _buildMessageElement(m, byMsgId, elements);
+      if (el) log.appendChild(el);
+    }
+  } catch (e) {
+    log.innerHTML = `<div class="chat-empty muted" style="color: var(--danger)">Ошибка поиска: ${escapeHtml(e.message)}</div>`;
+  }
+}
+
+// ---------- Notification sounds (WebAudio, no .wav files needed) ----------
+
+const SOUND_PREF_KEY = "wmb_sound";
+let AUDIO_CTX = null;
+
+function soundPrefEnabled() {
+  return localStorage.getItem(SOUND_PREF_KEY) !== "off";
+}
+function setSoundPref(on) {
+  localStorage.setItem(SOUND_PREF_KEY, on ? "on" : "off");
+  refreshSoundUi();
+}
+function refreshSoundUi() {
+  const cb = $("#soundEnabled");
+  if (cb) cb.checked = soundPrefEnabled();
+}
+
+function _ensureAudioCtx() {
+  if (!AUDIO_CTX) {
+    try {
+      const Ctx = window.AudioContext || window.webkitAudioContext;
+      if (Ctx) AUDIO_CTX = new Ctx();
+    } catch { /* unsupported */ }
+  }
+  // Some browsers suspend the ctx until a user gesture; resume on demand.
+  if (AUDIO_CTX && AUDIO_CTX.state === "suspended") {
+    AUDIO_CTX.resume().catch(() => {});
+  }
+  return AUDIO_CTX;
+}
+
+/** Play a short tone built from WebAudio oscillators. Variant tunes pitch+envelope. */
+function playNotificationSound(variant = "ding") {
+  const ctx = _ensureAudioCtx();
+  if (!ctx) return;
+  const profiles = {
+    // (freq1, freq2, duration, type)
+    ding:  { f1: 880,  f2: 1320, dur: 0.18, type: "sine"     },   // bright two-note
+    ping:  { f1: 1040, f2: null, dur: 0.13, type: "triangle" },   // single short pip
+    soft:  { f1: 660,  f2: null, dur: 0.10, type: "sine"     },   // for reactions
+    alert: { f1: 600,  f2: 1000, dur: 0.40, type: "square"   },   // sharper "tревога"
+  };
+  const p = profiles[variant] || profiles.ding;
+  const now = ctx.currentTime;
+  const gain = ctx.createGain();
+  gain.gain.setValueAtTime(0.0001, now);
+  gain.gain.exponentialRampToValueAtTime(0.18, now + 0.01);
+  gain.gain.exponentialRampToValueAtTime(0.0001, now + p.dur);
+  gain.connect(ctx.destination);
+  const osc1 = ctx.createOscillator();
+  osc1.type = p.type;
+  osc1.frequency.setValueAtTime(p.f1, now);
+  if (p.f2) osc1.frequency.exponentialRampToValueAtTime(p.f2, now + p.dur * 0.8);
+  osc1.connect(gain);
+  osc1.start(now);
+  osc1.stop(now + p.dur + 0.05);
 }
 
 // ---------- Reaction picker ----------
@@ -2051,7 +2422,24 @@ async function init() {
   await refreshSlots();
   refreshMeshStatus();
   refreshNotifUi();
+  refreshSoundUi();
   refreshAlertsUi();
+  $("#soundEnabled")?.addEventListener("change", (e) => setSoundPref(e.target.checked));
+  $("#soundTestBtn")?.addEventListener("click", () => playNotificationSound("ding"));
+
+  // Chat full-text search
+  let chatSearchTimer = null;
+  $("#chatSearchInput")?.addEventListener("input", (e) => {
+    clearTimeout(chatSearchTimer);
+    const q = e.target.value.trim();
+    $("#chatSearchClear").hidden = q.length === 0;
+    chatSearchTimer = setTimeout(() => runChatSearch(q), 250);
+  });
+  $("#chatSearchClear")?.addEventListener("click", () => {
+    $("#chatSearchInput").value = "";
+    $("#chatSearchClear").hidden = true;
+    runChatSearch("");
+  });
   pollChat();
   refreshDashboard();
   setInterval(refreshMeshStatus, 15000);
@@ -2065,6 +2453,63 @@ async function init() {
   }, 8000);
   // Wire telegram controls now that the DOM exists
   wireTelegramPanel();
+  wireUpdatePanel();
+}
+
+// ---------- Auto-update from git ----------
+
+function wireUpdatePanel() {
+  $("#updRefresh")?.addEventListener("click", refreshUpdateInfo);
+  $("#updPull")?.addEventListener("click", runGitUpdate);
+}
+
+async function refreshUpdateInfo() {
+  const txt = $("#updStatusText");
+  if (!txt) return;
+  txt.textContent = "Запрашиваю информацию…";
+  try {
+    const r = await api("/api/system/info");
+    if (!r.git_available) {
+      txt.textContent = "Git не найден или это не git-checkout: " + (r.error || "—");
+      return;
+    }
+    const behind = r.behind_count;
+    let s = `${r.branch} · ${r.commit} · «${r.message || ""}»`;
+    if (behind == null) s += " · (не могу проверить upstream)";
+    else if (behind === 0) s += " · ✅ актуальная версия";
+    else s += ` · ⬇️ доступно обновлений: ${behind}`;
+    txt.textContent = s;
+  } catch (e) {
+    txt.textContent = "Ошибка: " + e.message;
+  }
+}
+
+async function runGitUpdate() {
+  if (!confirm("Подтянуть последний код из git и обновить зависимости?")) return;
+  const restart = $("#updRestart").checked;
+  const logEl = $("#updLog");
+  const btn = $("#updPull");
+  btn.disabled = true; btn.textContent = "⏳ Обновляю…";
+  logEl.textContent = "";
+  try {
+    const r = await api("/api/system/update", { method: "POST", body: { restart } });
+    let out = "";
+    for (const s of r.steps || []) {
+      out += `\n$ ${s.cmd}\n${s.ok ? "(ok)" : "(FAIL rc=" + s.rc + ")"}\n${s.out || ""}\n`;
+    }
+    out += `\nbefore: ${r.before}\nafter:  ${r.after}\nchanged: ${r.changed}`;
+    if (r.restarting) out += `\n\n🔁 Сервис перезапускается через 1 сек…`;
+    logEl.textContent = out.trim();
+    if (r.ok && r.changed) toast(`Обновлено: ${r.before} → ${r.after}`, "ok");
+    else if (r.ok) toast("Уже на последней версии", "ok");
+    else toast(r.error || "Не удалось обновить", "err");
+    refreshUpdateInfo();
+  } catch (e) {
+    logEl.textContent = "Ошибка: " + e.message;
+    toast(e.message, "err");
+  } finally {
+    btn.disabled = false; btn.textContent = "📥 Обновить";
+  }
 }
 init().catch(e => toast(e.message, "err"));
 
@@ -2150,6 +2595,15 @@ async function saveTelegramConfig() {
   const proxy = $("#tgProxy").value.trim();
   const broadcastTo = $("#tgDest").value || "broadcast";
   const channelIndex = parseInt($("#tgChannelIndex").value, 10);
+  const stripEmoji = $("#tgStripEmoji").checked;
+  const includeSource = $("#tgIncludeSource").checked;
+  const stripSelfSig = $("#tgStripSelfSig").checked;
+  const blocklist = $("#tgBlocklist").value
+    .split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+  const maxChars = parseInt($("#tgMaxChars").value, 10);
+  const maxAts = parseInt($("#tgMaxAts").value, 10);
+  const maxUrls = parseInt($("#tgMaxUrls").value, 10);
+  const keepParas = parseInt($("#tgKeepParas").value, 10);
 
   const payload = {
     telegram: {
@@ -2165,6 +2619,14 @@ async function saveTelegramConfig() {
       proxy,
       broadcast_to: broadcastTo,
       channel_index: Number.isFinite(channelIndex) ? channelIndex : 0,
+      strip_emoji: stripEmoji,
+      include_source: includeSource,
+      strip_self_signature: stripSelfSig,
+      blocklist_lines: blocklist,
+      max_message_chars: Number.isFinite(maxChars) ? maxChars : 500,
+      max_at_mentions: Number.isFinite(maxAts) ? maxAts : 5,
+      max_urls: Number.isFinite(maxUrls) ? maxUrls : 3,
+      keep_first_paragraphs: Number.isFinite(keepParas) ? keepParas : 0,
     }
   };
   try {
@@ -2205,6 +2667,59 @@ async function testTelegramFetch() {
   }
   refreshTelegramStatus();
 }
+
+let TG_SEEN_FILTER = "all";
+
+function renderTgSeen(items) {
+  const el = $("#tgSeen");
+  const stats = $("#tgSeenStats");
+  if (!el) return;
+  const filter = $("#tgSeenFilter")?.value || "all";
+  TG_SEEN_FILTER = filter;
+  // Aggregate counts for the stats badge
+  const counts = { forwarded: 0, throttled: 0, no_keyword: 0, no_geo: 0, test: 0 };
+  for (const it of items) counts[it.status] = (counts[it.status] || 0) + 1;
+  if (stats) {
+    stats.textContent =
+      `всего ${items.length} · ✅ ${counts.forwarded||0} · ⏸ ${counts.throttled||0} · ⊘ ${counts.no_keyword||0} · 📍 ${counts.no_geo||0}`;
+  }
+  const filtered = filter === "all" ? items : items.filter(i => i.status === filter);
+  if (!filtered.length) {
+    el.innerHTML = `<div class="muted">${items.length === 0 ? "Пока ничего." : "По выбранному фильтру пусто."}</div>`;
+    return;
+  }
+  el.innerHTML = filtered.map(it => {
+    const time = new Date(it.ts * 1000).toLocaleTimeString();
+    const date = new Date(it.ts * 1000).toLocaleDateString();
+    const statusBadge = {
+      forwarded:  `<span class="tg-seen-badge ok">✅ отправлено</span>`,
+      throttled:  `<span class="tg-seen-badge warn">⏸ задросселлено</span>`,
+      no_keyword: `<span class="tg-seen-badge mute">⊘ нет ключа</span>`,
+      no_geo:     `<span class="tg-seen-badge mute">📍 не прошёл гео</span>`,
+      spam_filter:`<span class="tg-seen-badge warn">🛑 спам-фильтр</span>`,
+      test:       `<span class="tg-seen-badge ok">🧪 тест</span>`,
+    }[it.status] || `<span class="tg-seen-badge mute">${escapeHtml(it.status)}</span>`;
+    const kwInfo = it.keyword
+      ? `<span class="tg-seen-meta">«${escapeHtml(it.keyword)}»${it.geo ? ` · 📍${escapeHtml(it.geo)}` : ""}</span>`
+      : "";
+    return `<div class="tg-seen-item">
+      <div class="tg-seen-head">
+        ${statusBadge}
+        <span class="tg-seen-channel">${escapeHtml(it.channel)}</span>
+        ${kwInfo}
+        <span class="tg-seen-ts muted">${date} ${time}</span>
+      </div>
+      <div class="tg-seen-text">${escapeHtml(it.text || "")}</div>
+    </div>`;
+  }).join("");
+}
+
+// Re-render when the filter changes (use cached state — refresh comes from poll)
+document.addEventListener("change", (e) => {
+  if (e.target.id === "tgSeenFilter") {
+    if (TG_STATE) renderTgSeen(TG_STATE.recent_seen || []);
+  }
+});
 
 async function testTelegramSendMesh() {
   if (!confirm("Отправить тестовое сообщение в выбранный канал/адресат mesh?")) return;
@@ -2283,6 +2798,30 @@ async function refreshTelegramStatus() {
   if (cfg.proxy && !$("#tgProxy").value) {
     $("#tgProxy").value = cfg.proxy;
   }
+  if ($("#tgStripEmoji") && typeof cfg.strip_emoji === "boolean") {
+    $("#tgStripEmoji").checked = cfg.strip_emoji;
+  }
+  if ($("#tgIncludeSource") && typeof cfg.include_source === "boolean") {
+    $("#tgIncludeSource").checked = cfg.include_source;
+  }
+  if ($("#tgStripSelfSig") && typeof cfg.strip_self_signature === "boolean") {
+    $("#tgStripSelfSig").checked = cfg.strip_self_signature;
+  }
+  if ($("#tgBlocklist") && !$("#tgBlocklist").value && (cfg.blocklist_lines || []).length) {
+    $("#tgBlocklist").value = (cfg.blocklist_lines || []).join("\n");
+  }
+  if ($("#tgMaxChars") && cfg.max_message_chars != null && $("#tgMaxChars").value === "500") {
+    $("#tgMaxChars").value = cfg.max_message_chars;
+  }
+  if ($("#tgMaxAts") && cfg.max_at_mentions != null && $("#tgMaxAts").value === "5") {
+    $("#tgMaxAts").value = cfg.max_at_mentions;
+  }
+  if ($("#tgMaxUrls") && cfg.max_urls != null && $("#tgMaxUrls").value === "3") {
+    $("#tgMaxUrls").value = cfg.max_urls;
+  }
+  if ($("#tgKeepParas") && cfg.keep_first_paragraphs != null && $("#tgKeepParas").value === "0") {
+    $("#tgKeepParas").value = cfg.keep_first_paragraphs;
+  }
 
   // Make sure the destination + channel selects have the freshest options
   // available, then restore the persisted selection.
@@ -2295,6 +2834,9 @@ async function refreshTelegramStatus() {
       $("#tgChannelIndex").value = want;
     }
   }
+
+  // Render the debug seen-feed (every parsed message, with reason)
+  renderTgSeen(s.recent_seen || []);
 
   // Render recent matches
   const hist = $("#tgHistory");

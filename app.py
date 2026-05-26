@@ -21,6 +21,9 @@ from apscheduler.triggers.cron import CronTrigger
 from flask import Flask, jsonify, render_template, request
 
 import commands
+# Mark process start time for /uptime — must be set before anything heavy runs.
+commands.BOT_START_TS = time.time()
+
 import weather
 import weather_alerts
 from chat_db import ChatDb
@@ -654,6 +657,24 @@ def api_chat_messages():
     return jsonify({"messages": messages, "status_updates": status_updates})
 
 
+@app.route("/api/chat/search", methods=["GET"])
+def api_chat_search():
+    """Full-text search across stored chat history. ?q=<query>&limit=<N>"""
+    q = (request.args.get("q") or "").strip()
+    if not q:
+        return jsonify({"messages": []})
+    try:
+        limit = max(1, min(500, int(request.args.get("limit", 100))))
+    except (TypeError, ValueError):
+        limit = 100
+    try:
+        results = CHAT_DB.search(q, limit=limit)
+    except Exception as exc:
+        log.exception("Chat search failed")
+        return jsonify({"error": str(exc)}), 500
+    return jsonify({"messages": results, "query": q, "count": len(results)})
+
+
 @app.route("/api/chat/reply", methods=["POST"])
 def api_chat_reply():
     """Send a text reply to a previous mesh message.
@@ -786,9 +807,9 @@ def api_mesh_traceroute():
         return jsonify({"error": "Не указан адресат"}), 400
     try:
         hop_limit = int(payload.get("hop_limit") or 5)
-        timeout = float(payload.get("timeout") or 30)
+        timeout = float(payload.get("timeout") or 60)
     except (TypeError, ValueError):
-        hop_limit, timeout = 5, 30.0
+        hop_limit, timeout = 5, 60.0
     cfg = load_config()
     mesh_cfg = cfg.get("mesh", {}) or {}
     try:
@@ -952,6 +973,197 @@ def api_stats():
 @app.route("/api/health", methods=["GET"])
 def api_health():
     return jsonify({"ok": True, "time": datetime.utcnow().isoformat() + "Z"})
+
+
+@app.route("/api/system/info", methods=["GET"])
+def api_system_info():
+    """Version info — current commit, upstream HEAD, dirty flag."""
+    import subprocess
+    info = {"git_available": False}
+    try:
+        env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+        cur = subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=BASE_DIR, env=env, stderr=subprocess.DEVNULL, timeout=5,
+        ).decode().strip()
+        branch = subprocess.check_output(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=BASE_DIR, env=env, stderr=subprocess.DEVNULL, timeout=5,
+        ).decode().strip()
+        msg = subprocess.check_output(
+            ["git", "log", "-1", "--format=%s"],
+            cwd=BASE_DIR, env=env, stderr=subprocess.DEVNULL, timeout=5,
+        ).decode().strip()
+        info.update({"git_available": True, "commit": cur, "branch": branch, "message": msg})
+        try:
+            subprocess.check_output(
+                ["git", "fetch", "--quiet"],
+                cwd=BASE_DIR, env=env, stderr=subprocess.DEVNULL, timeout=15,
+            )
+            ahead = subprocess.check_output(
+                ["git", "rev-list", "--count", "HEAD..@{u}"],
+                cwd=BASE_DIR, env=env, stderr=subprocess.DEVNULL, timeout=5,
+            ).decode().strip()
+            info["behind_count"] = int(ahead or 0)
+        except Exception:
+            info["behind_count"] = None
+    except Exception as exc:
+        info["error"] = str(exc)
+    return jsonify(info)
+
+
+@app.route("/api/system/update", methods=["POST"])
+def api_system_update():
+    """Pull latest from git, install pip deps if requirements changed, and
+    return diagnostic info. The systemd service is configured with
+    Restart=on-failure so the user can manually restart via SSH after this
+    completes, or we exit the Python process which systemd will respawn.
+    """
+    import subprocess
+    payload = request.get_json(force=True, silent=True) or {}
+    do_restart = bool(payload.get("restart"))
+    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+    result: dict[str, Any] = {"steps": [], "ok": False}
+
+    def _run(cmd, **kw):
+        try:
+            out = subprocess.check_output(
+                cmd, cwd=BASE_DIR, env=env, stderr=subprocess.STDOUT,
+                timeout=kw.get("timeout", 60),
+            ).decode(errors="replace")
+            result["steps"].append({"cmd": " ".join(cmd), "ok": True, "out": out[-600:]})
+            return out, 0
+        except subprocess.CalledProcessError as exc:
+            result["steps"].append({
+                "cmd": " ".join(cmd), "ok": False,
+                "out": (exc.output or b"").decode(errors="replace")[-600:],
+                "rc": exc.returncode,
+            })
+            return None, exc.returncode
+        except Exception as exc:
+            result["steps"].append({"cmd": " ".join(cmd), "ok": False, "out": str(exc)})
+            return None, -1
+
+    # 1. Save current commit for rollback hint
+    head_before, _ = _run(["git", "rev-parse", "--short", "HEAD"])
+    # 2. Pull
+    out, rc = _run(["git", "pull", "--ff-only"], timeout=60)
+    if rc != 0:
+        result["error"] = "git pull failed — рабочая директория грязная или конфликты"
+        return jsonify(result), 500
+    # 3. Detect requirement changes
+    head_after, _ = _run(["git", "rev-parse", "--short", "HEAD"])
+    head_before = (head_before or "").strip()
+    head_after = (head_after or "").strip()
+    result["before"] = head_before
+    result["after"] = head_after
+    result["changed"] = head_before != head_after
+
+    if result["changed"]:
+        diff, _ = _run(["git", "diff", "--name-only", head_before, head_after], timeout=10)
+        changed_files = (diff or "").strip().split("\n") if diff else []
+        result["changed_files"] = changed_files
+        if "requirements.txt" in changed_files:
+            # Reinstall deps using the venv's pip
+            venv_pip = str(BASE_DIR / ".venv" / "bin" / "pip")
+            if Path(venv_pip).exists():
+                _run([venv_pip, "install", "-r", str(BASE_DIR / "requirements.txt")], timeout=180)
+            else:
+                result["steps"].append({"cmd": "pip install", "ok": False, "out": "venv not found"})
+
+    result["ok"] = True
+
+    if do_restart and result["changed"]:
+        # Schedule an in-process exit so systemd respawns us with the new code.
+        # If the service isn't configured with Restart=on-failure / always, the
+        # bot will simply stop. We respond first.
+        def _exit_soon():
+            time.sleep(1.0)
+            log.info("Exiting for systemd-restart after update")
+            os._exit(0)
+        threading.Thread(target=_exit_soon, daemon=True).start()
+        result["restarting"] = True
+
+    return jsonify(result)
+
+
+@app.route("/api/weather/current", methods=["GET"])
+def api_weather_current():
+    """Compact current-weather snapshot for the dashboard widget."""
+    cfg = load_config()
+    loc = cfg.get("location") or {}
+    if loc.get("latitude") is None or loc.get("longitude") is None:
+        return jsonify({"error": "Город не выбран"}), 400
+    try:
+        data = weather.fetch_weather(loc["latitude"], loc["longitude"], loc.get("timezone") or "auto")
+    except Exception as exc:
+        log.exception("Current weather fetch failed")
+        return jsonify({"error": str(exc)}), 500
+    cur = data.get("current") or {}
+    daily = data.get("daily") or {}
+    code = cur.get("weather_code")
+    text, emoji = weather.WMO_CODES_RU.get(int(code) if code is not None else -1, ("—", ""))
+    try:
+        tmin = (daily.get("temperature_2m_min") or [None])[0]
+        tmax = (daily.get("temperature_2m_max") or [None])[0]
+    except Exception:
+        tmin = tmax = None
+    out = {
+        "city": loc.get("name", ""),
+        "temperature_c": cur.get("temperature_2m"),
+        "feels_like_c": cur.get("apparent_temperature"),
+        "humidity": cur.get("relative_humidity_2m"),
+        "pressure_mmhg": weather.hpa_to_mmhg(cur.get("pressure_msl")),
+        "wind_speed_ms": cur.get("wind_speed_10m"),
+        "wind_direction": weather.wind_direction(cur.get("wind_direction_10m")),
+        "wind_gusts_ms": cur.get("wind_gusts_10m"),
+        "precipitation_mm": cur.get("precipitation"),
+        "weather_code": code,
+        "condition_text": text,
+        "condition_emoji": emoji,
+        "today_min": tmin,
+        "today_max": tmax,
+        "is_day": bool(cur.get("is_day")),
+    }
+    return jsonify(out)
+
+
+@app.route("/api/weather/hourly", methods=["GET"])
+def api_weather_hourly():
+    """Next 24h hourly arrays for the dashboard chart."""
+    cfg = load_config()
+    loc = cfg.get("location") or {}
+    if loc.get("latitude") is None or loc.get("longitude") is None:
+        return jsonify({"error": "Город не выбран"}), 400
+    try:
+        data = weather.fetch_weather(loc["latitude"], loc["longitude"], loc.get("timezone") or "auto")
+    except Exception as exc:
+        log.exception("Hourly weather fetch failed")
+        return jsonify({"error": str(exc)}), 500
+    hourly = data.get("hourly") or {}
+    times = hourly.get("time") or []
+    # Find current hour position so we only return the next 24 entries
+    now_iso = datetime.now().strftime("%Y-%m-%dT%H:00")
+    start = 0
+    for i, t in enumerate(times):
+        if t >= now_iso:
+            start = i
+            break
+    end = min(start + 24, len(times))
+
+    def _slice(key):
+        arr = hourly.get(key) or []
+        return arr[start:end]
+
+    return jsonify({
+        "city": loc.get("name", ""),
+        "time": _slice("time"),
+        "temperature_2m": _slice("temperature_2m"),
+        "precipitation_probability": _slice("precipitation_probability"),
+        "wind_speed_10m": _slice("wind_speed_10m"),
+        "weather_code": _slice("weather_code"),
+        "relative_humidity_2m": _slice("relative_humidity_2m"),
+    })
 
 
 # ---------------------------------------------------------------------------
