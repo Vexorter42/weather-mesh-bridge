@@ -98,6 +98,7 @@ $$(".tab-btn").forEach(btn => {
     } else if (CURRENT_TAB === "misc") {
       refreshTelegramStatus();
       refreshUpdateInfo();
+      refreshTgStatusBot();
     }
   });
 });
@@ -2393,12 +2394,24 @@ $("#chatSend").addEventListener("click", async () => {
       await api("/api/chat/send", { method: "POST", body });
     }
     $("#chatInput").value = "";
+    $("#chatInput").style.height = "auto";  // collapse back to one row
     pollChat();
   } catch (e) { toast(e.message, "err"); }
 });
 $("#chatInput").addEventListener("keydown", (e) => {
-  if (e.key === "Enter") { e.preventDefault(); $("#chatSend").click(); }
+  // Enter alone — send. Shift+Enter — let the textarea insert a newline.
+  if (e.key === "Enter" && !e.shiftKey) {
+    e.preventDefault();
+    $("#chatSend").click();
+    return;
+  }
   if (e.key === "Escape" && REPLY_TO) { e.preventDefault(); cancelReply(); }
+});
+// Auto-grow textarea as the user adds lines (capped by CSS max-height).
+$("#chatInput").addEventListener("input", (e) => {
+  const el = e.target;
+  el.style.height = "auto";
+  el.style.height = el.scrollHeight + "px";
 });
 
 // ---------- Init ----------
@@ -2447,13 +2460,112 @@ async function init() {
   setInterval(() => {
     if (CURRENT_TAB === "home") refreshDashboard();
   }, 30000);
-  // Auto-refresh the Telegram bridge panel while the user looks at it
+  // Auto-refresh the Telegram bridge + status-bot panels while user looks at them
   setInterval(() => {
-    if (CURRENT_TAB === "misc") refreshTelegramStatus();
+    if (CURRENT_TAB === "misc") {
+      refreshTelegramStatus();
+      refreshTgStatusBot();
+    }
   }, 8000);
   // Wire telegram controls now that the DOM exists
   wireTelegramPanel();
   wireUpdatePanel();
+  wireTgStatusBotPanel();
+}
+
+// ---------- Telegram status-bot (pinned message) ----------
+
+function wireTgStatusBotPanel() {
+  $("#tgsSave")?.addEventListener("click", saveTgStatusConfig);
+  $("#tgsStart")?.addEventListener("click", async () => {
+    await saveTgStatusConfig();
+    try {
+      const r = await api("/api/tg-status/start", { method: "POST" });
+      if (!r.ok && r.error) toast(r.error, "err"); else toast("Запущен", "ok");
+    } catch (e) { toast(e.message, "err"); }
+    refreshTgStatusBot();
+  });
+  $("#tgsStop")?.addEventListener("click", async () => {
+    try {
+      await api("/api/tg-status/stop", { method: "POST" });
+      toast("Остановлен", "ok");
+    } catch (e) { toast(e.message, "err"); }
+    refreshTgStatusBot();
+  });
+  $("#tgsUpdateNow")?.addEventListener("click", async () => {
+    const btn = $("#tgsUpdateNow"); btn.disabled = true; btn.textContent = "⏳ Обновляю…";
+    try {
+      const r = await api("/api/tg-status/update-now", { method: "POST" });
+      if (r.ok) toast("Сообщение обновлено", "ok");
+      else toast("Ошибка: " + (r.error || "—"), "err");
+    } catch (e) { toast(e.message, "err"); }
+    finally { btn.disabled = false; btn.textContent = "🔄 Обновить сейчас"; }
+    refreshTgStatusBot();
+  });
+  $("#tgsReset")?.addEventListener("click", async () => {
+    if (!confirm("Забыть текущий закреп? Следующее обновление создаст новое сообщение.")) return;
+    try {
+      await api("/api/tg-status/reset-message", { method: "POST" });
+      toast("Сброшено — следующее сообщение будет новым", "ok");
+    } catch (e) { toast(e.message, "err"); }
+    refreshTgStatusBot();
+  });
+}
+
+async function saveTgStatusConfig() {
+  const payload = {
+    telegram_status: {
+      bot_token:       $("#tgsToken").value.trim(),
+      chat_id:         $("#tgsChatId").value.trim(),
+      update_seconds:  Math.max(15, parseInt($("#tgsUpdateSec").value, 10) || 60),
+      proxy:           $("#tgsProxy").value.trim(),
+      auto_pin:        $("#tgsAutoPin").checked,
+      show_weather:    $("#tgsShowWeather").checked,
+      show_mesh_stats: $("#tgsShowMesh").checked,
+      extra_text:      $("#tgsExtra").value.trim(),
+    },
+  };
+  try {
+    await api("/api/config", { method: "POST", body: payload });
+    toast("Сохранено", "ok");
+  } catch (e) { toast(e.message, "err"); }
+}
+
+async function refreshTgStatusBot() {
+  let s;
+  try { s = await api("/api/tg-status/status"); }
+  catch (e) {
+    setTgsStatus("err", "Ошибка: " + e.message);
+    return;
+  }
+  const c = s.config || {};
+
+  // Status dot/text
+  if (s.running) {
+    const last = s.last_success_ts ? new Date(s.last_success_ts * 1000).toLocaleTimeString() : "—";
+    setTgsStatus("ok", `Работает · последнее обновление ${last} · всего: ${s.updates_count}`);
+  } else if (s.last_error) {
+    setTgsStatus("err", "Остановлен · " + s.last_error);
+  } else {
+    setTgsStatus("idle", c.bot_token_set && c.chat_id ? "Готов запуститься" : "Заполни bot_token и chat_id");
+  }
+
+  // Reflect config (only when fields are empty — don't stomp user typing)
+  if (!$("#tgsToken").value && c.bot_token_set) $("#tgsToken").placeholder = "(сохранено)";
+  if (!$("#tgsChatId").value && c.chat_id) $("#tgsChatId").value = c.chat_id;
+  if (c.update_seconds != null && $("#tgsUpdateSec").value === "60") $("#tgsUpdateSec").value = c.update_seconds;
+  if (c.proxy && !$("#tgsProxy").value) $("#tgsProxy").value = c.proxy;
+  if (typeof c.auto_pin === "boolean")  $("#tgsAutoPin").checked = c.auto_pin;
+  if (typeof c.show_weather === "boolean") $("#tgsShowWeather").checked = c.show_weather;
+  if (typeof c.show_mesh_stats === "boolean") $("#tgsShowMesh").checked = c.show_mesh_stats;
+  if (c.extra_text && !$("#tgsExtra").value) $("#tgsExtra").value = c.extra_text;
+}
+
+function setTgsStatus(kind, text) {
+  const dot = $("#tgsStatus .tg-dot");
+  const txt = $("#tgsStatusText");
+  if (dot) dot.className = `tg-dot tg-dot-${kind}`;
+  if (txt) txt.textContent = text;
 }
 
 // ---------- Auto-update from git ----------

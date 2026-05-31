@@ -15,8 +15,9 @@
   <script defer src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin="anonymous"></script>
 </head>
 <body>
+  <div class="app-shell">
   <header class="topbar">
-    <h1>
+    <div class="brand">
       <svg class="brand-icon" viewBox="0 0 24 24" aria-hidden="true">
         <defs>
           <linearGradient id="brandGrad" x1="0%" y1="0%" x2="100%" y2="100%">
@@ -34,21 +35,47 @@
         <circle cx="12" cy="18" r="1.1" fill="rgba(255,255,255,0.85)"/>
       </svg>
       <span class="brand-text">Weather → Mesh</span>
-    </h1>
+    </div>
     <div class="status" id="meshStatus">…</div>
   </header>
 
-  <nav class="tabs">
-    <button class="tab-btn active" data-tab="home">📊 Главная</button>
-    <button class="tab-btn" data-tab="map">🗺 Карта</button>
-    <button class="tab-btn" data-tab="settings">⚙️ Настройки</button>
-    <button class="tab-btn" data-tab="chat">💬 Чат <span class="badge" id="chatBadge" hidden>0</span></button>
-    <button class="tab-btn" data-tab="misc">🧪 Прочее</button>
+  <div class="app-body">
+  <nav class="sidebar" aria-label="Навигация">
+    <button class="tab-btn active" data-tab="home"><span class="nav-icon" aria-hidden="true">📊</span><span class="nav-label">Главная</span></button>
+    <button class="tab-btn" data-tab="map"><span class="nav-icon" aria-hidden="true">🗺</span><span class="nav-label">Карта</span></button>
+    <button class="tab-btn" data-tab="settings"><span class="nav-icon" aria-hidden="true">⚙️</span><span class="nav-label">Настройки</span></button>
+    <button class="tab-btn" data-tab="chat"><span class="nav-icon" aria-hidden="true">💬</span><span class="nav-label">Чат</span><span class="badge" id="chatBadge" hidden>0</span></button>
+    <button class="tab-btn" data-tab="misc"><span class="nav-icon" aria-hidden="true">🧪</span><span class="nav-label">Прочее</span></button>
   </nav>
 
   <main>
     <!-- =================== HOME TAB =================== -->
     <div class="tab-panel active" data-tab="home">
+      <!-- Hero: network status at a glance -->
+      <section class="card dash-hero" id="dashHero">
+        <div class="hero-status">
+          <span class="hero-dot" aria-hidden="true"></span>
+          <div class="hero-status-text">
+            <div class="stat-value" id="statConn">…</div>
+            <div class="stat-sub" id="statConnSub"></div>
+          </div>
+        </div>
+        <div class="hero-metrics">
+          <div class="hero-metric">
+            <span class="hm-val" id="statNodes">—</span>
+            <span class="hm-lbl">узлов</span>
+          </div>
+          <div class="hero-metric">
+            <span class="hm-val" id="statSenders">—</span>
+            <span class="hm-lbl">отправителей · 24ч</span>
+          </div>
+          <div class="hero-metric">
+            <span class="hm-val" id="statTotal">—</span>
+            <span class="hm-lbl">сообщений всего</span>
+          </div>
+        </div>
+      </section>
+
       <section class="card weather-widget-card" id="weatherWidget">
         <div class="ww-head">
           <h2>🌤 Погода сейчас</h2>
@@ -67,32 +94,6 @@
         <div class="hourly-legend muted">
           <span class="hl-line"></span> температура °C &nbsp;·&nbsp;
           <span class="hl-bar"></span> вероятность осадков %
-        </div>
-      </section>
-
-      <section class="card">
-        <h2>📡 Состояние</h2>
-        <div class="stats-grid">
-          <div class="stat">
-            <div class="stat-label">Связь с Heltec</div>
-            <div class="stat-value" id="statConn">…</div>
-            <div class="stat-sub" id="statConnSub"></div>
-          </div>
-          <div class="stat">
-            <div class="stat-label">Слышимых узлов</div>
-            <div class="stat-value" id="statNodes">—</div>
-            <div class="stat-sub">в таблице ноды</div>
-          </div>
-          <div class="stat">
-            <div class="stat-label">Уникальных отправителей</div>
-            <div class="stat-value" id="statSenders">—</div>
-            <div class="stat-sub">за 24 часа</div>
-          </div>
-          <div class="stat">
-            <div class="stat-label">Всего сообщений</div>
-            <div class="stat-value" id="statTotal">—</div>
-            <div class="stat-sub">в базе бота</div>
-          </div>
         </div>
       </section>
 
@@ -389,14 +390,13 @@
               <button class="reply-to-cancel ghost" title="Отменить ответ">✕</button>
             </div>
             <div class="row chat-compose">
-              <input type="text" id="chatInput" placeholder="Выбери чат и начни писать…" disabled>
+              <textarea id="chatInput" rows="1" placeholder="Выбери чат и начни писать…  (Shift+Enter — новая строка)" disabled></textarea>
               <button id="chatSend" class="primary" disabled>Отправить</button>
             </div>
           </div>
         </div>
       </section>
     </div>
-  </main>
 
     <!-- =================== MISC TAB =================== -->
     <div class="tab-panel" data-tab="misc">
@@ -429,6 +429,82 @@
               </label>
             </div>
             <pre id="updLog" class="preview" style="margin-top: 12px; max-height: 240px; overflow-y: auto;"></pre>
+          </div>
+        </details>
+
+        <!-- ===== Telegram status-bot (pinned message) ===== -->
+        <details class="experiment" id="experimentTgStatus">
+          <summary>
+            <label class="toggle-row" onclick="event.stopPropagation();">
+              <input type="checkbox" id="tgsEnabled">
+              <span><strong>Статус-бот в Telegram-чате</strong> — редактирует закреплённое сообщение с погодой и онлайн-статусом</span>
+            </label>
+          </summary>
+          <div class="experiment-body">
+            <p class="hint">
+              Бот живёт в указанном чате и каждые N секунд переписывает заранее закреплённое сообщение свежими данными:
+              онлайн-статусом, текущей погодой, статистикой mesh. Когда бот падает — сообщение остаётся со старым временем,
+              а по желанию systemd-хук помечает его как <code>🔴 OFFLINE</code>.
+            </p>
+
+            <div class="tg-status" id="tgsStatus">
+              <span class="tg-dot tg-dot-idle"></span>
+              <span id="tgsStatusText">Загружаю состояние…</span>
+            </div>
+
+            <div class="profile-section">Настройка бота (одноразово)</div>
+            <p class="hint">
+              1. Открой <a href="https://t.me/BotFather" target="_blank" rel="noopener">@BotFather</a> → <code>/newbot</code> → скопируй <strong>bot_token</strong>.<br>
+              2. Добавь бота в нужный чат и сделай его <strong>админом</strong> с правом «Pin messages».<br>
+              3. Узнай <strong>chat_id</strong> чата — например через <a href="https://t.me/getmyid_bot" target="_blank" rel="noopener">@getmyid_bot</a> (для группы — переслать туда сообщение и спросить ID), либо <code>-100xxxxxxx</code> для супергрупп.
+            </p>
+            <label>Bot token <small>(вид <code>1234567890:ABC…</code>)</small>
+              <input type="text" id="tgsToken" placeholder="123:ABC…" autocomplete="off">
+            </label>
+            <label>Chat ID <small>(число; для групп обычно отрицательное)</small>
+              <input type="text" id="tgsChatId" placeholder="-1001234567890">
+            </label>
+
+            <div class="profile-section">Параметры обновления</div>
+            <div class="grid2">
+              <label>Интервал обновления, сек <small>(минимум 15)</small>
+                <input type="number" id="tgsUpdateSec" min="15" max="3600" step="15" value="60">
+              </label>
+              <label>Прокси <small>(пусто = использовать прокси из «Telegram-мост»)</small>
+                <input type="text" id="tgsProxy" placeholder="socks5://127.0.0.1:10808 или пусто">
+              </label>
+            </div>
+
+            <label class="toggle-row">
+              <input type="checkbox" id="tgsAutoPin" checked>
+              <span>Автоматически закрепить сообщение при первой отправке (нужно право <code>Pin messages</code>)</span>
+            </label>
+            <label class="toggle-row">
+              <input type="checkbox" id="tgsShowWeather" checked>
+              <span>Показывать погоду (температура, ощущение, влажность, ветер)</span>
+            </label>
+            <label class="toggle-row">
+              <input type="checkbox" id="tgsShowMesh" checked>
+              <span>Показывать статистику mesh-сети (узлы / онлайн)</span>
+            </label>
+
+            <label>Доп. текст внизу <small>(одна-две строки, например подсказка чату)</small>
+              <textarea id="tgsExtra" rows="2" placeholder="Только для ответов с бота. Если вдруг не увидели текст в интерфейсе мештастика." class="tg-textarea"></textarea>
+            </label>
+
+            <div class="row">
+              <button id="tgsSave">💾 Сохранить</button>
+              <button id="tgsStart" class="primary">▶ Запустить бота</button>
+              <button id="tgsStop" class="danger-action">⏹ Остановить</button>
+              <button id="tgsUpdateNow" class="ghost">🔄 Обновить сейчас</button>
+              <button id="tgsReset" class="ghost" title="Забыть закреп — следующее сообщение будет новым">✂ Сбросить закреп</button>
+            </div>
+
+            <p class="hint" style="margin-top: 12px;">
+              📐 <strong>Совет:</strong> сначала создай бота, добавь в чат, нажми «Сохранить» — потом «Запустить».
+              Бот сразу пошлёт сообщение и попробует его закрепить. Если у него нет права закреплять — закрепи руками,
+              <code>message_id</code> бот всё равно запомнит.
+            </p>
           </div>
         </details>
 
@@ -630,6 +706,9 @@
         </details>
       </section>
     </div>
+  </main>
+  </div><!-- /.app-body -->
+  </div><!-- /.app-shell -->
 
   <div id="toast" class="toast"></div>
 

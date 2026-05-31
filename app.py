@@ -29,6 +29,7 @@ import weather_alerts
 from chat_db import ChatDb
 from meshbridge import MeshBridge
 from telegram_bridge import DEFAULTS as TG_DEFAULTS, TELETHON_AVAILABLE, TelegramBridge
+from telegram_status_bot import DEFAULTS as TGS_DEFAULTS, TelegramStatusBot
 
 logging.basicConfig(
     level=logging.INFO,
@@ -99,6 +100,7 @@ def load_config() -> dict[str, Any]:
             "alerts": dict(weather_alerts.DEFAULTS),
             "schedules": [],
             "telegram": dict(TG_DEFAULTS),
+            "telegram_status": dict(TGS_DEFAULTS),
         }
     with CONFIG_PATH.open("r", encoding="utf-8") as f:
         cfg = json.load(f)
@@ -178,6 +180,82 @@ if _tg_cfg_init.get("enabled") and TELETHON_AVAILABLE:
             log.warning("Telegram bridge auto-start skipped: %s", r.get("error"))
     except Exception:
         log.exception("Telegram bridge auto-start crashed")
+
+
+# --- Telegram status-bot (pins/edits a single message in a chat) ---
+
+def _tg_status_save_partial(partial: dict[str, Any]) -> None:
+    """Merge a small dict into config.json under telegram_status — used by the
+    bot to persist its message_id after sendMessage."""
+    with _cfg_lock:
+        cfg = load_config()
+        existing = cfg.get("telegram_status") or {}
+        # Shallow-merge only the telegram_status section
+        if "telegram_status" in partial:
+            existing.update(partial["telegram_status"] or {})
+            cfg["telegram_status"] = existing
+        save_config(cfg)
+
+
+def _tg_status_stats() -> dict[str, Any]:
+    """Cheap status snapshot for the status-bot to embed in messages."""
+    try:
+        s = CHAT_DB.stats()
+    except Exception:
+        s = {}
+    try:
+        mesh = BRIDGE.status() or {}
+    except Exception:
+        mesh = {}
+    s["mesh_connected"] = bool(mesh.get("connected"))
+    s["mesh_nodes_known"] = mesh.get("nodes_known")
+    s["mesh_nodes_online_2h"] = mesh.get("nodes_online_2h")
+    s["mesh_nodes_online_1h"] = mesh.get("nodes_online_1h")
+    return s
+
+
+def _tg_status_weather() -> Optional[dict[str, Any]]:
+    """Build a current-weather snapshot for the status-bot. Returns None if
+    the configured city has no coords."""
+    cfg = load_config()
+    loc = cfg.get("location") or {}
+    if loc.get("latitude") is None or loc.get("longitude") is None:
+        return None
+    try:
+        data = weather.fetch_weather(
+            loc["latitude"], loc["longitude"], loc.get("timezone") or "auto"
+        )
+    except Exception:
+        log.exception("status-bot weather fetch failed")
+        return None
+    cur = data.get("current") or {}
+    code = cur.get("weather_code")
+    text, emoji = weather.WMO_CODES_RU.get(int(code) if code is not None else -1, ("—", ""))
+    return {
+        "city": loc.get("name", ""),
+        "temperature_c": cur.get("temperature_2m"),
+        "feels_like_c": cur.get("apparent_temperature"),
+        "humidity": cur.get("relative_humidity_2m"),
+        "wind_speed_ms": cur.get("wind_speed_10m"),
+        "condition_text": text,
+        "condition_emoji": emoji,
+    }
+
+
+TELEGRAM_STATUS_BOT = TelegramStatusBot(
+    config_save=_tg_status_save_partial,
+    config_load=load_config,
+    stats_provider=_tg_status_stats,
+    weather_provider=_tg_status_weather,
+)
+_tgs_cfg_init = CONFIG.get("telegram_status") or {}
+if _tgs_cfg_init.get("enabled"):
+    try:
+        r = TELEGRAM_STATUS_BOT.start()
+        if not r.get("ok"):
+            log.warning("Telegram status-bot auto-start skipped: %s", r.get("error"))
+    except Exception:
+        log.exception("Telegram status-bot auto-start crashed")
 
 
 def _mesh_healthcheck():
@@ -472,6 +550,8 @@ def api_set_config():
             cfg["alerts"] = {**weather_alerts.DEFAULTS, **(cfg.get("alerts") or {}), **payload["alerts"]}
         if "telegram" in payload:
             cfg["telegram"] = {**TG_DEFAULTS, **(cfg.get("telegram") or {}), **payload["telegram"]}
+        if "telegram_status" in payload:
+            cfg["telegram_status"] = {**TGS_DEFAULTS, **(cfg.get("telegram_status") or {}), **payload["telegram_status"]}
         save_config(cfg)
     BRIDGE.configure(cfg.get("mesh", {}) or {})
     # Push the freshest telegram config into the bridge. Reconfigure will
@@ -908,6 +988,70 @@ def api_telegram_test():
     except Exception as exc:
         log.exception("Telegram test_fetch crashed")
         return jsonify({"ok": False, "error": str(exc)}), 500
+
+
+@app.route("/api/tg-status/status", methods=["GET"])
+def api_tg_status_get():
+    """Return TG status-bot runtime info + the persisted config block."""
+    cfg = load_config().get("telegram_status") or {}
+    return jsonify({
+        **TELEGRAM_STATUS_BOT.status(),
+        "config": {
+            "enabled":        bool(cfg.get("enabled")),
+            "bot_token_set":  bool(cfg.get("bot_token")),
+            "chat_id":        cfg.get("chat_id") or "",
+            "update_seconds": cfg.get("update_seconds") or 60,
+            "auto_pin":       cfg.get("auto_pin") is not False,
+            "proxy":          cfg.get("proxy") or "",
+            "message_id":     cfg.get("message_id"),
+            "show_mesh_stats": cfg.get("show_mesh_stats") is not False,
+            "show_weather":   cfg.get("show_weather") is not False,
+            "extra_text":     cfg.get("extra_text") or "",
+        },
+    })
+
+
+@app.route("/api/tg-status/start", methods=["POST"])
+def api_tg_status_start():
+    with _cfg_lock:
+        cfg = load_config()
+        cfg.setdefault("telegram_status", dict(TGS_DEFAULTS))["enabled"] = True
+        save_config(cfg)
+    r = TELEGRAM_STATUS_BOT.start()
+    return jsonify(r), (200 if r.get("ok") else 400)
+
+
+@app.route("/api/tg-status/stop", methods=["POST"])
+def api_tg_status_stop():
+    with _cfg_lock:
+        cfg = load_config()
+        cfg.setdefault("telegram_status", dict(TGS_DEFAULTS))["enabled"] = False
+        save_config(cfg)
+    return jsonify(TELEGRAM_STATUS_BOT.stop())
+
+
+@app.route("/api/tg-status/update-now", methods=["POST"])
+def api_tg_status_update_now():
+    """Force an immediate edit — used by the «Обновить сейчас» button."""
+    return jsonify(TELEGRAM_STATUS_BOT.update_now())
+
+
+@app.route("/api/tg-status/mark-offline", methods=["POST"])
+def api_tg_status_mark_offline():
+    """Overwrite the pinned message with '🔴 OFFLINE'. Called by a systemd
+    ExecStopPost hook or external cron when the main service goes down."""
+    return jsonify(TELEGRAM_STATUS_BOT.mark_offline())
+
+
+@app.route("/api/tg-status/reset-message", methods=["POST"])
+def api_tg_status_reset_message():
+    """Forget the stored message_id so the next tick sends a fresh message."""
+    with _cfg_lock:
+        cfg = load_config()
+        s = cfg.setdefault("telegram_status", dict(TGS_DEFAULTS))
+        s["message_id"] = None
+        save_config(cfg)
+    return jsonify({"ok": True})
 
 
 @app.route("/api/telegram/test_send", methods=["POST"])

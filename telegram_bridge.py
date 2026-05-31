@@ -657,13 +657,10 @@ class TelegramBridge:
                 self._last_fwd[key] = now
 
             body = _strip_emoji(text) if strip_emoji else text
-            # Strip ad lines and (optionally) the channel's own self-signature
-            body = _strip_blocklist(
-                body,
-                blocklist or [],
-                self_username=(ch if strip_self_sig else None),
-            )
-            # Anti-spam: hard-drop messages with too many @-mentions / URLs.
+            # Anti-spam runs FIRST on the (almost-)raw text — otherwise the
+            # blocklist would strip URLs/@mentions and make the spam check
+            # blind. Bulk-promo posts with 80+ links must be dropped before
+            # anything else touches them.
             spam_why = _spam_reason(body, max_ats, max_urls)
             if spam_why:
                 self._record_seen(
@@ -672,6 +669,12 @@ class TelegramBridge:
                 )
                 log.info("TG[web] %s — dropped as spam: %s", src_name, spam_why)
                 continue
+            # Strip ad lines and (optionally) the channel's own self-signature
+            body = _strip_blocklist(
+                body,
+                blocklist or [],
+                self_username=(ch if strip_self_sig else None),
+            )
             # Slice to first N paragraphs (keep the alert, drop the long tail)
             body = _keep_first_paragraphs(body, keep_paras)
             # If stripping wiped the whole message (was emoji+ad-only) — skip
@@ -842,9 +845,7 @@ class TelegramBridge:
                 if not throttled:
                     self._last_fwd[key] = now
                 body = _strip_emoji(text) if strip_emoji_flag else text
-                # Strip blocklist + channel's own @username footer
-                tg_self = username if strip_self_sig_flag else None
-                body = _strip_blocklist(body, blocklist_flag, self_username=tg_self)
+                # Spam check on the raw text first (see web-mode comment).
                 spam_why = _spam_reason(body, max_ats_flag, max_urls_flag)
                 if spam_why:
                     self._record_seen(
@@ -853,6 +854,9 @@ class TelegramBridge:
                     )
                     log.info("TG[telethon] %s — dropped as spam: %s", src_name, spam_why)
                     return
+                # Strip blocklist + channel's own @username footer
+                tg_self = username if strip_self_sig_flag else None
+                body = _strip_blocklist(body, blocklist_flag, self_username=tg_self)
                 body = _keep_first_paragraphs(body, keep_paras_flag)
                 if not body:
                     return
