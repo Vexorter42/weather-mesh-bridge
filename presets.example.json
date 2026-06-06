@@ -1,0 +1,8 @@
+{
+  "_comment": "Скопируй этот файл в presets.local.json (он в .gitignore) и впиши свои значения. При старте бот подхватит keywords/geo_filter/blocklist_lines как дефолты Telegram-моста. Реальные каналы/прокси задаются в UI и хранятся в config.json.",
+  "telegram": {
+    "keywords": ["слово1", "слово2"],
+    "geo_filter": ["ВашРегион", "ВашГород"],
+    "blocklist_lines": ["re:подпис", "re:реклам", "re:https?://\\S+"]
+  }
+}

@@ -28,6 +28,7 @@ import weather
 import weather_alerts
 from chat_db import ChatDb
 from meshbridge import MeshBridge
+import llm
 from telegram_bridge import DEFAULTS as TG_DEFAULTS, TELETHON_AVAILABLE, TelegramBridge
 from telegram_status_bot import DEFAULTS as TGS_DEFAULTS, TelegramStatusBot
 
@@ -39,8 +40,37 @@ log = logging.getLogger("weather-mesh-bridge")
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "config.json"
+PRESETS_PATH = BASE_DIR / "presets.local.json"
 
 DAYS_ORDER = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+
+
+def _apply_local_presets() -> None:
+    """Seed Telegram-bridge keyword/geo/blocklist defaults from an optional,
+    git-ignored `presets.local.json`. The committed code ships these empty so
+    the public repo stays topic-neutral; dropping the one preset file into the
+    project folder activates a ready-made preset (keywords, geo filter, etc.).
+
+    File format (all keys optional):
+        { "telegram": { "keywords": [...], "geo_filter": [...],
+                        "blocklist_lines": [...] } }
+    Only seeds DEFAULTS — never overrides an existing config.json.
+    """
+    if not PRESETS_PATH.exists():
+        return
+    try:
+        data = json.loads(PRESETS_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        log.exception("Failed to read presets.local.json — ignoring")
+        return
+    tg = (data or {}).get("telegram") or {}
+    for key in ("keywords", "geo_filter", "blocklist_lines"):
+        if isinstance(tg.get(key), list):
+            TG_DEFAULTS[key] = list(tg[key])
+    log.info("Loaded local presets from %s", PRESETS_PATH.name)
+
+
+_apply_local_presets()
 
 
 # ---------------------------------------------------------------------------
@@ -101,6 +131,7 @@ def load_config() -> dict[str, Any]:
             "schedules": [],
             "telegram": dict(TG_DEFAULTS),
             "telegram_status": dict(TGS_DEFAULTS),
+            "llm": dict(llm.DEFAULTS),
         }
     with CONFIG_PATH.open("r", encoding="utf-8") as f:
         cfg = json.load(f)
@@ -552,6 +583,8 @@ def api_set_config():
             cfg["telegram"] = {**TG_DEFAULTS, **(cfg.get("telegram") or {}), **payload["telegram"]}
         if "telegram_status" in payload:
             cfg["telegram_status"] = {**TGS_DEFAULTS, **(cfg.get("telegram_status") or {}), **payload["telegram_status"]}
+        if "llm" in payload:
+            cfg["llm"] = {**llm.DEFAULTS, **(cfg.get("llm") or {}), **payload["llm"]}
         save_config(cfg)
     BRIDGE.configure(cfg.get("mesh", {}) or {})
     # Push the freshest telegram config into the bridge. Reconfigure will
@@ -710,7 +743,17 @@ def api_chat_messages():
         since = int(request.args.get("since", "0"))
     except ValueError:
         since = 0
-    messages = BRIDGE.get_messages(since)
+    # On the first load the client passes ?tail=N to fetch only the newest N
+    # messages instead of replaying the whole history forward from id 0.
+    tail_raw = request.args.get("tail")
+    if since == 0 and tail_raw:
+        try:
+            tail_n = max(1, min(500, int(tail_raw)))
+        except (TypeError, ValueError):
+            tail_n = 200
+        messages = CHAT_DB.get_recent(tail_n)
+    else:
+        messages = BRIDGE.get_messages(since)
 
     status_updates: list[dict[str, Any]] = []
     raw = (request.args.get("status_for") or "").strip()
@@ -1117,6 +1160,42 @@ def api_stats():
 @app.route("/api/health", methods=["GET"])
 def api_health():
     return jsonify({"ok": True, "time": datetime.utcnow().isoformat() + "Z"})
+
+
+@app.route("/api/llm/status", methods=["GET"])
+def api_llm_status():
+    """LLM config (without leaking the api_key) for the settings UI."""
+    c = (load_config().get("llm") or {})
+    return jsonify({
+        "enabled": bool(c.get("enabled")),
+        "api_key_set": bool(c.get("api_key")),
+        "base_url": c.get("base_url") or llm.DEFAULTS["base_url"],
+        "model": c.get("model") or llm.DEFAULTS["model"],
+        "system_prompt": c.get("system_prompt") or llm.DEFAULTS["system_prompt"],
+        "max_tokens": c.get("max_tokens") or llm.DEFAULTS["max_tokens"],
+        "temperature": c.get("temperature", llm.DEFAULTS["temperature"]),
+        "proxy": c.get("proxy") or "",
+        "max_reply_chars": c.get("max_reply_chars") or llm.DEFAULTS["max_reply_chars"],
+    })
+
+
+@app.route("/api/llm/test", methods=["POST"])
+def api_llm_test():
+    """Verify connectivity/auth — asks the model to reply 'ok'."""
+    return jsonify(llm.test_connection(load_config()))
+
+
+@app.route("/api/llm/ask", methods=["POST"])
+def api_llm_ask():
+    """Ask the LLM a question from the web UI (doesn't touch the mesh)."""
+    payload = request.get_json(force=True, silent=True) or {}
+    q = (payload.get("question") or "").strip()
+    if not q:
+        return jsonify({"error": "Пустой вопрос"}), 400
+    try:
+        return jsonify({"answer": llm.ask(q, load_config())})
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
 
 
 @app.route("/api/system/info", methods=["GET"])

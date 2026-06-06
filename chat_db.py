@@ -68,7 +68,8 @@ class ChatDb:
                     rx_rssi REAL,
                     rx_snr REAL,
                     delivery_status TEXT,
-                    delivery_hops INTEGER
+                    delivery_hops INTEGER,
+                    via_mqtt INTEGER NOT NULL DEFAULT 0
                 )
                 """
             )
@@ -83,6 +84,8 @@ class ChatDb:
                 c.execute("ALTER TABLE messages ADD COLUMN delivery_status TEXT")
             if "delivery_hops" not in cols:
                 c.execute("ALTER TABLE messages ADD COLUMN delivery_hops INTEGER")
+            if "via_mqtt" not in cols:
+                c.execute("ALTER TABLE messages ADD COLUMN via_mqtt INTEGER NOT NULL DEFAULT 0")
 
             # Full-text search index over the text column. FTS5 ships with
             # stock SQLite on Debian/Raspberry Pi OS. Triggers keep it in
@@ -131,6 +134,7 @@ class ChatDb:
         d = dict(row)
         d["incoming"] = bool(d.get("incoming"))
         d["is_reaction"] = bool(d.get("is_reaction"))
+        d["via_mqtt"] = bool(d.get("via_mqtt"))
         return d
 
     def add(self, msg: dict[str, Any]) -> dict[str, Any]:
@@ -142,8 +146,8 @@ class ChatDb:
                 INSERT INTO messages (time, from_id, from_name, to_id, channel, text, incoming,
                                       msg_id, reply_to, is_reaction,
                                       hops_taken, rx_rssi, rx_snr,
-                                      delivery_status, delivery_hops)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                      delivery_status, delivery_hops, via_mqtt)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     int(msg.get("time") or time.time()),
@@ -161,6 +165,7 @@ class ChatDb:
                     msg.get("rx_snr"),
                     msg.get("delivery_status"),
                     msg.get("delivery_hops"),
+                    1 if msg.get("via_mqtt") else 0,
                 ),
             )
             new_id = cursor.lastrowid

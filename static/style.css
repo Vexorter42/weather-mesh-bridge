@@ -1278,6 +1278,16 @@ button.run-now:disabled { opacity: 0.5; cursor: wait; }
   font-weight: 800;
   font-size: 0.76rem;
 }
+.chat-msg .meta .from-clickable {
+  cursor: pointer;
+  text-decoration: underline dotted transparent;
+  text-underline-offset: 2px;
+  transition: text-decoration-color var(--transition), opacity var(--transition);
+}
+.chat-msg .meta .from-clickable:hover {
+  text-decoration-color: currentColor;
+  opacity: 0.85;
+}
 .chat-msg.outgoing .meta { color: rgba(255, 255, 255, 0.88); }
 .chat-msg.outgoing .meta .from { color: #fff; }
 .chat-msg .meta .ch {
@@ -1311,7 +1321,8 @@ button.run-now:disabled { opacity: 0.5; cursor: wait; }
 }
 .rf-meta .hops,
 .rf-meta .rssi,
-.rf-meta .snr {
+.rf-meta .snr,
+.rf-meta .mqtt {
   padding: 2px 9px;
   border: 1px solid var(--glass-border);
   border-radius: 999px;
@@ -1322,10 +1333,12 @@ button.run-now:disabled { opacity: 0.5; cursor: wait; }
 .chat-msg.outgoing .rf-meta { color: rgba(255, 255, 255, 0.85); }
 .chat-msg.outgoing .rf-meta .hops,
 .chat-msg.outgoing .rf-meta .rssi,
-.chat-msg.outgoing .rf-meta .snr {
+.chat-msg.outgoing .rf-meta .snr,
+.chat-msg.outgoing .rf-meta .mqtt {
   background: rgba(255, 255, 255, 0.15);
   border-color: rgba(255, 255, 255, 0.3);
 }
+.rf-meta .mqtt { color: var(--magenta); border-color: rgba(215, 123, 255, 0.4); background: rgba(215, 123, 255, 0.14); }
 .rf-meta .hops.direct { border-color: var(--good); color: var(--good); background: var(--good-glow); }
 .rf-meta .rssi.good { color: var(--good); border-color: var(--good); }
 .rf-meta .rssi.ok   { color: var(--warn); border-color: var(--warn); }
@@ -1434,11 +1447,14 @@ button.run-now:disabled { opacity: 0.5; cursor: wait; }
   position: absolute;
   z-index: 100;
   display: flex;
-  gap: 4px;
-  padding: 8px;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  width: 300px;
+  max-width: calc(100vw - 16px);
   background: var(--glass-bg-strong);
   border: 1px solid var(--glass-border-strong);
-  border-radius: 999px;
+  border-radius: 16px;
   box-shadow: var(--shadow-lg);
   backdrop-filter: var(--glass-blur);
   -webkit-backdrop-filter: var(--glass-blur);
@@ -1448,21 +1464,56 @@ button.run-now:disabled { opacity: 0.5; cursor: wait; }
   from { opacity: 0; transform: scale(0.8); }
   to   { opacity: 1; transform: scale(1); }
 }
-.reaction-picker button {
+.reaction-grid {
+  display: grid;
+  grid-template-columns: repeat(8, 1fr);
+  gap: 2px;
+}
+@media (max-width: 430px) {
+  .reaction-picker { width: 268px; }
+  .reaction-grid { grid-template-columns: repeat(6, 1fr); }
+}
+.reaction-grid button {
   background: transparent;
   border: none;
-  font-size: 1.35rem;
-  width: 36px;
-  height: 36px;
-  border-radius: 50%;
+  font-size: 1.3rem;
+  width: 34px;
+  height: 34px;
+  border-radius: 8px;
   cursor: pointer;
   padding: 0;
   transition: background var(--transition), transform var(--transition);
 }
-.reaction-picker button:hover {
+.reaction-grid button:hover {
   background: var(--glass-bg);
-  transform: scale(1.25);
+  transform: scale(1.2);
 }
+.reaction-custom {
+  display: flex;
+  gap: 6px;
+  border-top: 1px solid var(--glass-border);
+  padding-top: 8px;
+}
+.reaction-custom .reaction-custom-input {
+  flex: 1 1 auto;
+  width: auto;
+  min-width: 0;
+  padding: 6px 10px;
+  font-size: 1rem;
+  border-radius: 8px;
+}
+.reaction-custom .reaction-custom-send {
+  flex: 0 0 auto;
+  width: 38px;
+  padding: 0;
+  border: none;
+  border-radius: 8px;
+  color: #fff;
+  background: linear-gradient(135deg, var(--accent), var(--accent-3));
+  cursor: pointer;
+  font-size: 0.95rem;
+}
+.reaction-custom .reaction-custom-send:hover { filter: brightness(1.12); }
 
 .reactions {
   display: flex;
@@ -2160,6 +2211,19 @@ button.run-now:disabled { opacity: 0.5; cursor: wait; }
 .tg-test-result.ok  { border-color: var(--good);   background: var(--good-glow); }
 .tg-test-result.err { border-color: var(--danger); background: var(--danger-glow); }
 .tg-test-result[hidden] { display: none; }
+
+/* LLM answer box */
+.llm-ask-result {
+  margin-top: 8px;
+  padding: 12px 14px;
+  border-radius: var(--radius-sm);
+  background: linear-gradient(135deg, var(--accent-glow), rgba(215,123,255,0.10));
+  border: 1px solid var(--glass-border-strong);
+  font-size: 0.92rem;
+  line-height: 1.5;
+}
+.llm-ask-result[hidden] { display: none; }
+.llm-ask-result .llm-answer { color: #fff; white-space: pre-wrap; word-break: break-word; }
 
 .tg-history {
   margin-top: 10px;

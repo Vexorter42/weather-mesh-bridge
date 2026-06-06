@@ -23,10 +23,12 @@ log = logging.getLogger(__name__)
 
 DEFAULT_TCP_PORT = 4403
 
-# Meshtastic firmware caps a single text packet around 228 bytes of UTF-8 payload.
-# We keep some headroom for protocol overhead and for the "(N/M) " prefix when chunking.
-MAX_TEXT_BYTES = 200
-CHUNK_PREFIX_BUDGET = 12          # "(99/99) " upper bound
+# Meshtastic firmware caps a single text packet at ~237 bytes of Data payload;
+# the text itself can use ~228 of that. We pack chunks right up to this limit
+# to minimise the number of LoRa transmissions. If you ever see a
+# "Data payload too big" error from the firmware, lower MAX_TEXT_BYTES a bit.
+MAX_TEXT_BYTES = 228
+CHUNK_PREFIX_BUDGET = 9           # reserve for the "(i/N) " prefix — "(99/99) " == 8 chars
 CHUNK_DELAY_SECONDS = 10.0        # default pause between chunks; can be overridden per-call
 
 
@@ -44,10 +46,17 @@ def _utf8_len(s: str) -> int:
 
 
 def split_for_mesh(text: str, max_bytes: int = MAX_TEXT_BYTES) -> list[str]:
-    """Split a multi-line text into chunks that each fit into max_bytes UTF-8 bytes.
+    """Split text into chunks that each fit into max_bytes UTF-8 bytes.
 
-    Splits at line boundaries first; falls back to char-level cuts only if a
-    single line exceeds the limit.
+    Packing strategy (greedy, word-aware):
+      1. Each chunk is filled to the byte limit as tightly as possible.
+      2. Breaks happen on **word boundaries** (spaces) and line boundaries —
+         never in the middle of a word.
+      3. Only if a *single word* is itself longer than the whole budget do we
+         fall back to a character-level cut for that one word.
+
+    So "привет меня зовут" never becomes "привет ме-ня зовут"; it stays
+    "привет меня" / "зовут" if it has to split at all.
     """
     if not text:
         return [text] if text == "" else []
@@ -55,47 +64,66 @@ def split_for_mesh(text: str, max_bytes: int = MAX_TEXT_BYTES) -> list[str]:
         return [text]
 
     chunks: list[str] = []
-    current: list[str] = []
+    current = ""           # chunk being built
     current_bytes = 0
 
     def flush():
         nonlocal current, current_bytes
         if current:
-            chunks.append("\n".join(current))
-            current = []
+            chunks.append(current)
+            current = ""
             current_bytes = 0
 
-    for raw_line in text.split("\n"):
-        line_bytes = _utf8_len(raw_line)
-        sep = 1 if current else 0  # newline between accumulated lines
-        if line_bytes <= max_bytes and current_bytes + sep + line_bytes <= max_bytes:
-            current.append(raw_line)
-            current_bytes += sep + line_bytes
+    def add(token: str, sep: str) -> None:
+        """Append `token` to the current chunk, prefixed by `sep` (" " or "\\n"),
+        starting a new chunk if it wouldn't fit. `sep` is omitted at chunk start."""
+        nonlocal current, current_bytes
+        tb = _utf8_len(token)
+
+        # A single token bigger than the whole budget — char-split it (rare:
+        # only some 200-char URL with no spaces would trigger this).
+        if tb > max_bytes:
+            flush()
+            buf, buf_bytes = "", 0
+            for ch in token:
+                cb = _utf8_len(ch)
+                if buf_bytes + cb > max_bytes:
+                    chunks.append(buf)
+                    buf, buf_bytes = ch, cb
+                else:
+                    buf += ch
+                    buf_bytes += cb
+            if buf:
+                current, current_bytes = buf, buf_bytes
+            return
+
+        sb = _utf8_len(sep) if current else 0
+        if current_bytes + sb + tb <= max_bytes:
+            current += (sep if current else "") + token
+            current_bytes += sb + tb
+        else:
+            flush()
+            current = token
+            current_bytes = tb
+
+    lines = text.split("\n")
+    for li, line in enumerate(lines):
+        if line == "":
+            # Preserve a blank line (paragraph break) if there's room in the
+            # current chunk; otherwise just let the flush handle spacing.
+            if current and current_bytes + 1 <= max_bytes:
+                current += "\n"
+                current_bytes += 1
             continue
-
-        # Either the line itself is too big, or it can't fit alongside what we have.
-        flush()
-
-        if line_bytes <= max_bytes:
-            current = [raw_line]
-            current_bytes = line_bytes
-            continue
-
-        # Long single line — break by characters keeping UTF-8 boundaries intact.
-        buf = ""
-        buf_bytes = 0
-        for ch in raw_line:
-            cb = _utf8_len(ch)
-            if buf_bytes + cb > max_bytes:
-                chunks.append(buf)
-                buf = ch
-                buf_bytes = cb
+        words = [w for w in line.split(" ") if w != ""]
+        for wi, word in enumerate(words):
+            if not current and not chunks:
+                sep = ""          # very first token of the message
+            elif wi == 0:
+                sep = "\n"        # first word of a new line
             else:
-                buf += ch
-                buf_bytes += cb
-        if buf:
-            current = [buf]
-            current_bytes = buf_bytes
+                sep = " "         # subsequent word on the same line
+            add(word, sep)
 
     flush()
     return chunks
@@ -564,6 +592,7 @@ class MeshBridge:
         rx_rssi: Optional[float] = None,
         rx_snr: Optional[float] = None,
         delivery_status: Optional[str] = None,
+        via_mqtt: bool = False,
     ) -> dict[str, Any]:
         # For outgoing messages we default to "enroute" — the packet is already
         # on the air (we wouldn't be here if _sendPacket had thrown). Status
@@ -585,6 +614,7 @@ class MeshBridge:
             "rx_rssi": rx_rssi,
             "rx_snr": rx_snr,
             "delivery_status": delivery_status,
+            "via_mqtt": bool(via_mqtt),
         }
         if self._db is None:
             log.warning("ChatDb is not set on MeshBridge; message will be dropped")
@@ -649,6 +679,10 @@ class MeshBridge:
             rx_rssi = _to_float(packet.get("rxRssi"))
             rx_snr = _to_float(packet.get("rxSnr"))
 
+            # Packets relayed through an MQTT gateway carry the `viaMqtt` flag
+            # (i.e. they reached us over the internet, not purely over LoRa RF).
+            via_mqtt = bool(packet.get("viaMqtt") or packet.get("via_mqtt"))
+
             msg = self._add_message(
                 text=text,
                 from_id=from_id,
@@ -662,6 +696,7 @@ class MeshBridge:
                 hops_taken=hops_taken,
                 rx_rssi=rx_rssi,
                 rx_snr=rx_snr,
+                via_mqtt=via_mqtt,
             )
             # Trigger command handler in a background thread — it might want
             # to send a reply, which we can't do from inside the pubsub callback.

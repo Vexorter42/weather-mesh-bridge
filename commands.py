@@ -13,6 +13,7 @@ from datetime import datetime
 from typing import Any, Callable, Optional
 
 import weather
+import llm
 
 # Set when app.py starts up — used by /uptime.
 BOT_START_TS: float = time.time()
@@ -136,6 +137,10 @@ def cmd_ping(args, msg, bridge, cfg):
     hp = _hops_phrase(hops)
     if hp:
         parts.append(hp)
+    # Note if the request reached us via an MQTT gateway (internet) rather
+    # than purely over LoRa RF.
+    if msg.get("via_mqtt"):
+        parts.append("🌐 MQTT")
     return " · ".join(parts)
 
 
@@ -299,6 +304,64 @@ def cmd_weather(args, msg, bridge, cfg):
         include_header=True,
         use_emojis=use_emojis,
     )
+
+
+# Full report = everything ALL_FIELDS knows, minus the "tomorrow" block.
+_FULL_FIELDS = [
+    "temp", "feels", "vs_yesterday", "water_temp",
+    "humidity", "pressure", "wind", "precipitation",
+    "air_quality", "uv_index", "forecast",
+]
+
+
+@command(
+    "сводка", "полная", "all", "full",
+    help_text="/сводка [город] — полная сводка (всё, кроме завтра)",
+)
+def cmd_full(args, msg, bridge, cfg):
+    lat, lon, name, tz = _resolve_location(args, cfg)
+    data = weather.fetch_weather(lat, lon, tz)
+    # The extended fields need data from separate endpoints — fetch them
+    # best-effort and inject into the same dict format_message expects.
+    try:
+        data["_air_quality"] = weather.fetch_air_quality(lat, lon, tz)
+    except Exception:
+        log.exception("/сводка: air quality fetch failed")
+    try:
+        data["_water_temp"] = weather.fetch_water_temperature(lat, lon, tz)
+    except Exception:
+        log.exception("/сводка: water temp fetch failed")
+    try:
+        data["_yesterday"] = weather.fetch_yesterday(lat, lon, tz)
+    except Exception:
+        log.exception("/сводка: yesterday fetch failed")
+    use_emojis = bool((cfg.get("message") or {}).get("use_emojis"))
+    return weather.format_message(
+        data,
+        fields=_FULL_FIELDS,
+        location_name=name,
+        include_header=True,
+        use_emojis=use_emojis,
+    )
+
+
+@command(
+    "ai", "ии", "gpt", "спроси", "ask",
+    help_text="/ai <вопрос> — спросить ИИ (ответ кратко, в эфир)",
+)
+def cmd_ai(args, msg, bridge, cfg):
+    if not args:
+        return "Использование: /ai <вопрос>. Например: /ai что взять в поход осенью?"
+    if not llm.is_enabled(cfg):
+        return "ИИ выключен или не настроен. Включи и впиши ключ в «Настройки → ИИ-ассистент»."
+    question = " ".join(args).strip()
+    if len(question) > 600:
+        question = question[:600]
+    try:
+        return llm.ask(question, cfg)
+    except Exception as exc:
+        log.warning("/ai failed: %s", exc)
+        return f"ИИ недоступен: {exc}"
 
 
 @command(

@@ -25,6 +25,12 @@ Thumbs.db
 # Persistent personal config (см. config.example.json)
 config.json
 
+# Local presets (topic-specific keyword/geo/blocklist sets) — kept out of the
+# public repo. Drop a presets.local.json into the folder to activate. See
+# presets.example.json for the format.
+presets.local.json
+*.local.json
+
 # TLS certificates (auto-generated, не должны попадать в репозиторий)
 tls/
 *.pem

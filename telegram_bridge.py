@@ -54,7 +54,10 @@ DEFAULTS = {
     "api_id": None,               # telethon mode only
     "api_hash": "",               # telethon mode only
     "channels": [],
-    "keywords": ["БПЛА", "беспилотник", "угроза", "тревога", "атака", "ракет"],
+    # Keywords are intentionally empty by default — set them in the UI, or drop
+    # a `presets.local.json` (git-ignored) into the project folder to seed them.
+    # See presets.example.json for the format.
+    "keywords": [],
     # Geo filter — extra keywords for narrowing alerts to your region. If the
     # list is non-empty, a message must mention at least one of these words
     # in addition to one of `keywords` to be forwarded. Empty list = no geo

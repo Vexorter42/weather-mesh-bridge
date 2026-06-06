@@ -406,6 +406,77 @@
           Фичи в разработке. Включай только то, что понимаешь — оно может ломаться, есть лишние зависимости и т.п.
         </p>
 
+        <!-- ===== LLM / AI assistant ===== -->
+        <details class="experiment" id="experimentLlm">
+          <summary>
+            <label class="toggle-row" onclick="event.stopPropagation();">
+              <input type="checkbox" id="llmEnabled">
+              <span><strong>ИИ-ассистент</strong> — команда <code>/ai &lt;вопрос&gt;</code> в чате (OpenAI-совместимый API)</span>
+            </label>
+          </summary>
+          <div class="experiment-body">
+            <p class="hint">
+              Любой в mesh-сети пишет <code>/ai &lt;вопрос&gt;</code> — бот спрашивает LLM и шлёт краткий ответ в эфир.
+              Работает с любым OpenAI-совместимым API: NVIDIA build, OpenAI, OpenRouter, локальный Ollama и т.п.
+            </p>
+
+            <div class="tg-status" id="llmStatus">
+              <span class="tg-dot tg-dot-idle"></span>
+              <span id="llmStatusText">Загружаю состояние…</span>
+            </div>
+
+            <div class="profile-section">Подключение</div>
+            <p class="hint">
+              <strong>OpenRouter:</strong> <a href="https://openrouter.ai/keys" target="_blank" rel="noopener">openrouter.ai/keys</a> → ключ вида <code>sk-or-v1-…</code>,
+              Base URL <code>https://openrouter.ai/api/v1</code>, модель <code>moonshotai/kimi-k2</code> (без «размышлений» — отвечает сразу).<br>
+              💡 <code>kimi-k2.6</code> — reasoning-модель: думает долго, нужен <code>max_tokens</code> ≥ 1500. Для эфира лучше <code>kimi-k2</code>.
+            </p>
+            <label>API ключ <small>(хранится локально в config.json, не в git)</small>
+              <input type="password" id="llmApiKey" placeholder="sk-or-v1-… / sk-… / nvapi-…" autocomplete="off">
+            </label>
+            <div class="grid2">
+              <label>Base URL
+                <input type="text" id="llmBaseUrl" placeholder="https://openrouter.ai/api/v1">
+              </label>
+              <label>Модель
+                <input type="text" id="llmModel" placeholder="moonshotai/kimi-k2">
+              </label>
+            </div>
+            <label>Прокси <small>(пусто = напрямую; можно socks5://127.0.0.1:10808)</small>
+              <input type="text" id="llmProxy" placeholder="пусто или socks5://host:port">
+            </label>
+
+            <div class="profile-section">Поведение</div>
+            <label>System-промпт <small>(инструкция модели — держи ответы короткими для LoRa!)</small>
+              <textarea id="llmSystemPrompt" rows="3" class="tg-textarea"></textarea>
+            </label>
+            <div class="grid2">
+              <label>Макс. токенов ответа
+                <input type="number" id="llmMaxTokens" min="16" max="2000" step="16" value="200">
+              </label>
+              <label>Макс. символов в mesh <small>(жёсткий обрез)</small>
+                <input type="number" id="llmMaxChars" min="50" max="2000" step="50" value="600">
+              </label>
+              <label>Temperature <small>(0 — строго, 1 — креативно)</small>
+                <input type="number" id="llmTemp" min="0" max="2" step="0.1" value="0.6">
+              </label>
+            </div>
+
+            <div class="row">
+              <button id="llmSave">💾 Сохранить</button>
+              <button id="llmTest" class="ghost">🔍 Проверить связь</button>
+            </div>
+            <div id="llmTestResult" class="tg-test-result" hidden></div>
+
+            <div class="profile-section">Пробный вопрос <small>(только в браузере, не в эфир)</small></div>
+            <div class="row">
+              <input type="text" id="llmAskInput" placeholder="Спроси что-нибудь…" style="flex: 1;">
+              <button id="llmAskBtn" class="primary">Спросить</button>
+            </div>
+            <div id="llmAskResult" class="llm-ask-result" hidden></div>
+          </div>
+        </details>
+
         <!-- ===== Auto-update ===== -->
         <details class="experiment" id="experimentUpdate">
           <summary>
@@ -513,14 +584,14 @@
           <summary>
             <label class="toggle-row" onclick="event.stopPropagation();">
               <input type="checkbox" id="tgEnabled">
-              <span><strong>Telegram-мост</strong> — пересылать сообщения из каналов про БПЛА в mesh</span>
+              <span><strong>Telegram-мост</strong> — пересылать сообщения из выбранных Telegram-каналов в mesh</span>
             </label>
           </summary>
 
           <div class="experiment-body">
             <p class="hint">
               Бот слушает указанные Telegram-каналы и при появлении ключевого слова шлёт сообщение в mesh.
-              Подходит для каналов, куда обычного бота не добавить — типа официальных каналов МЧС / военкомов / тревог по БПЛА.
+              Подходит для публичных каналов, куда обычного бота не добавить (например официальные информационные каналы).
             </p>
 
             <div class="tg-status" id="tgStatus">
@@ -587,7 +658,7 @@
 
             <div class="profile-section">Ключевые слова</div>
             <p class="hint">Через запятую. Совпадение по подстроке, без учёта регистра. Хотя бы одно слово должно быть в сообщении.</p>
-            <input type="text" id="tgKeywords" placeholder="БПЛА, беспилотник, ракет, тревога">
+            <input type="text" id="tgKeywords" placeholder="ключевое слово 1, ключевое слово 2, …">
 
             <div class="profile-section">Гео-фильтр <small>(опционально — сужает алерты до твоего региона)</small></div>
             <p class="hint">

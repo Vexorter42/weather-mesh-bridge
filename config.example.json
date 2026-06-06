@@ -26,10 +26,20 @@
     "api_id": null,
     "api_hash": "",
     "channels": [],
-    "keywords": ["БПЛА", "беспилотник", "угроза", "тревога", "атака", "ракет"],
+    "keywords": [],
     "broadcast_to": "broadcast",
     "channel_index": 0,
     "min_interval_seconds": 60,
     "forward_prefix": "🚨 TG"
+  },
+  "llm": {
+    "enabled": false,
+    "base_url": "https://openrouter.ai/api/v1",
+    "api_key": "",
+    "model": "moonshotai/kimi-k2",
+    "max_tokens": 200,
+    "temperature": 0.6,
+    "proxy": "",
+    "max_reply_chars": 600
   }
 }

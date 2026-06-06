@@ -47,6 +47,9 @@ function buildRfMeta(m) {
   if (m.rx_snr != null) {
     parts.push(`<span class="snr" title="Соотношение сигнал/шум">SNR ${m.rx_snr.toFixed(1)}</span>`);
   }
+  if (m.via_mqtt) {
+    parts.push(`<span class="mqtt" title="Пришло через MQTT-шлюз (интернет), не напрямую по радио">🌐 MQTT</span>`);
+  }
   return parts.length ? `<div class="rf-meta">${parts.join(" · ")}</div>` : "";
 }
 
@@ -99,6 +102,7 @@ $$(".tab-btn").forEach(btn => {
       refreshTelegramStatus();
       refreshUpdateInfo();
       refreshTgStatusBot();
+      refreshLlmStatus();
     }
   });
 });
@@ -1753,6 +1757,29 @@ function selectConversation(key) {
 // long-running chats — picking a chat used to lag for seconds with ~200 msgs.
 const CHAT_RENDER_LIMIT = 200;
 
+// Build the sender-name span; clickable (→ profile / DM) for incoming nodes.
+function fromSpanHtml(m) {
+  const name = escapeHtml(m.from_name || "?");
+  const fid = m.from_id;
+  if (m.incoming && fid && fid !== "me") {
+    return `<span class="from from-clickable" data-from-id="${escapeHtml(String(fid))}" title="Профиль · написать DM">${name}</span>`;
+  }
+  return `<span class="from">${name}</span>`;
+}
+
+// Open a sender's profile, or offer a direct DM if they're not in the node table.
+function openSenderInfo(fromId) {
+  if (!fromId || fromId === "me") return;
+  const n = KNOWN_NODES.find(x => x.node_id === fromId || String(x.num) === String(fromId));
+  if (n) { openNodeProfile(n.node_id); return; }
+  if (confirm("Этого узла нет в текущей таблице нод. Открыть личную переписку?")) {
+    ensureDmConversation(fromId);
+    const tabBtn = document.querySelector('.tab-btn[data-tab="chat"]');
+    if (tabBtn) tabBtn.click();
+    setTimeout(() => selectConversation(`dm:${fromId}`), 80);
+  }
+}
+
 function _buildMessageElement(m, byMsgId, elements) {
   // Reaction packets aren't rendered as separate bubbles — they become chips
   // on their parent message. If the parent is already in our batch, attach
@@ -1801,7 +1828,7 @@ function _buildMessageElement(m, byMsgId, elements) {
 
   div.innerHTML =
     `<div class="meta">` +
-      `<span class="from">${escapeHtml(m.from_name || "?")}</span>` +
+      fromSpanHtml(m) +
       `<span class="ch">ch${m.channel ?? 0}</span>` +
       `<span>${t}</span>` +
       status +
@@ -1960,7 +1987,7 @@ function appendChatMessage(m) {
     : "";
   div.innerHTML =
     `<div class="meta">` +
-      `<span class="from">${escapeHtml(m.from_name || "?")}</span>` +
+      fromSpanHtml(m) +
       `<span class="ch">ch${m.channel ?? 0}</span>` +
       `<span>${t}</span>` +
       status +
@@ -1986,6 +2013,10 @@ async function pollChat() {
   try {
     pruneStalePending();
     const params = new URLSearchParams({ since: String(LAST_MSG_ID) });
+    // On the very first poll, grab only the newest ~200 messages instead of
+    // replaying the entire history forward from id 0 (which was slow AND made
+    // a sound fire for every backlogged message).
+    if (LAST_MSG_ID === 0) params.set("tail", "200");
     if (PENDING_OUT_IDS.size) {
       params.set("status_for", Array.from(PENDING_OUT_IDS).join(","));
     }
@@ -2013,6 +2044,7 @@ async function pollChat() {
     if (!data.messages?.length) return;
     const firstPoll = LAST_MSG_ID === 0;
     let shouldRerender = false;
+    let freshIncoming = 0;     // count genuinely-new incoming msgs this batch
     for (const m of data.messages) {
       ALL_MESSAGES.push(m);
       trackPending(m);
@@ -2030,13 +2062,20 @@ async function pollChat() {
       if (m.incoming && !m.is_reaction && CURRENT_TAB !== "chat") {
         UNREAD += 1;
       }
-      // Browser notification for new incoming text messages
-      if (!firstPoll && m.incoming && !m.is_reaction) {
+      // Browser notification only for genuinely-fresh incoming text messages.
+      // The freshness guard (msg younger than 45s) stops the whole backlog
+      // from notifying when history pages in across polls.
+      if (!firstPoll && m.incoming && !m.is_reaction && isFreshIncoming(m)) {
         notifyIncoming(m);
+        freshIncoming += 1;
       }
       if (!firstPoll || ALL_MESSAGES.length === data.messages.length) {
         shouldRerender = true;
       }
+    }
+    // One sound per poll batch (not per message), and only if something fresh.
+    if (freshIncoming > 0 && soundPrefEnabled()) {
+      playNotificationSound("ding");
     }
     if (shouldRerender) {
       rebuildConversations();
@@ -2132,9 +2171,14 @@ function shouldNotify() {
   return true;
 }
 
+// A message is "fresh" only if it arrived within the last 45 seconds — used to
+// suppress notifications/sound when a large backlog is paged in over polls.
+function isFreshIncoming(m) {
+  return (Date.now() / 1000 - (m.time || 0)) < 45;
+}
+
 function notifyIncoming(m) {
-  // Play sound regardless of OS notification permission (often denied on LAN)
-  if (soundPrefEnabled()) playNotificationSound(m.is_reaction ? "soft" : (isBroadcast(m) ? "ping" : "ding"));
+  // Sound is played once per poll batch in pollChat — not here (per message).
   if (!shouldNotify()) return;
   try {
     const n = new Notification(`💬 ${m.from_name || "Mesh"}`, {
@@ -2255,7 +2299,15 @@ function playNotificationSound(variant = "ding") {
 }
 
 // ---------- Reaction picker ----------
-const QUICK_REACTIONS = ["👍", "❤️", "😂", "😮", "😢", "🙏", "🔥", "👀"];
+const QUICK_REACTIONS = [
+  // Лица / эмоции
+  "👍", "👎", "❤️", "🔥", "😂", "😮", "😢", "😡",
+  "🙏", "👀", "🎉", "🤔", "😍", "🥳", "😎", "🤝",
+  // Статус / реакция по делу
+  "✅", "❌", "⚠️", "❓", "❗", "💯", "👌", "🫡",
+  // Тематика mesh / погода / тревоги
+  "📡", "🛰️", "🌧️", "⛈️", "❄️", "☀️", "🚨", "✈️",
+];
 let reactionPickerEl = null;
 let reactionTargetMsgId = null;
 
@@ -2275,28 +2327,42 @@ function openReactionPicker(btn) {
 
   const picker = document.createElement("div");
   picker.className = "reaction-picker";
-  picker.innerHTML = QUICK_REACTIONS
-    .map(e => `<button data-emoji="${escapeHtml(e)}">${e}</button>`)
-    .join("");
+  picker.innerHTML =
+    `<div class="reaction-grid">` +
+      QUICK_REACTIONS.map(e => `<button data-emoji="${escapeHtml(e)}" title="${escapeHtml(e)}">${e}</button>`).join("") +
+    `</div>` +
+    `<div class="reaction-custom">` +
+      `<input type="text" class="reaction-custom-input" maxlength="8" placeholder="свой эмодзи…" aria-label="Свой эмодзи">` +
+      `<button class="reaction-custom-send" title="Отправить">➤</button>` +
+    `</div>`;
   reactionPickerEl = picker;
 
-  // Position picker near the button
+  // Position picker near the button, clamped to the viewport (flips above the
+  // button if there isn't enough room below — the grid makes it taller now).
   document.body.appendChild(picker);
   const rect = btn.getBoundingClientRect();
   const pw = picker.offsetWidth;
+  const ph = picker.offsetHeight;
   let left = rect.left + window.scrollX + rect.width / 2 - pw / 2;
-  // keep within viewport
   left = Math.max(8, Math.min(left, window.innerWidth - pw - 8));
-  const top = rect.bottom + window.scrollY + 6;
+  let top = rect.bottom + window.scrollY + 6;
+  // Not enough space below → place above the button
+  if (rect.bottom + ph + 12 > window.innerHeight) {
+    top = rect.top + window.scrollY - ph - 6;
+    if (top < window.scrollY + 8) top = window.scrollY + 8;   // clamp to top
+  }
   picker.style.left = left + "px";
   picker.style.top = top + "px";
+  // Autofocus the custom-emoji input only on non-touch (avoid popping the
+  // mobile keyboard over the grid).
+  if (window.matchMedia("(hover: hover)").matches) {
+    picker.querySelector(".reaction-custom-input")?.focus();
+  }
 
-  picker.addEventListener("click", async (e) => {
-    const tgt = e.target.closest("button[data-emoji]");
-    if (!tgt) return;
-    const emoji = tgt.dataset.emoji;
+  async function sendReaction(emoji) {
     const reply_to = reactionTargetMsgId;
     closeReactionPicker();
+    emoji = (emoji || "").trim();
     if (!emoji || !reply_to) return;
     try {
       await api("/api/chat/react", {
@@ -2306,10 +2372,30 @@ function openReactionPicker(btn) {
       // Don't toast — the chip will appear under the message via pollChat.
       pollChat();
     } catch (err) { toast(err.message, "err"); }
+  }
+
+  picker.addEventListener("click", (e) => {
+    const tgt = e.target.closest("button[data-emoji]");
+    if (tgt) { sendReaction(tgt.dataset.emoji); return; }
+    if (e.target.closest(".reaction-custom-send")) {
+      sendReaction(picker.querySelector(".reaction-custom-input")?.value);
+    }
+  });
+  const customInput = picker.querySelector(".reaction-custom-input");
+  customInput?.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); sendReaction(customInput.value); }
+    else if (e.key === "Escape") { e.preventDefault(); closeReactionPicker(); }
   });
 }
 
 document.addEventListener("click", (e) => {
+  // Click on a sender name → open their profile / offer a DM
+  const fromEl = e.target.closest(".from-clickable");
+  if (fromEl) {
+    e.stopPropagation();
+    openSenderInfo(fromEl.dataset.fromId);
+    return;
+  }
   // Reaction button → open emoji picker
   const reactBtn = e.target.closest(".react-btn");
   if (reactBtn) {
@@ -2471,6 +2557,107 @@ async function init() {
   wireTelegramPanel();
   wireUpdatePanel();
   wireTgStatusBotPanel();
+  wireLlmPanel();
+}
+
+// ---------- LLM / AI assistant ----------
+
+function wireLlmPanel() {
+  $("#llmEnabled")?.addEventListener("change", async (e) => {
+    // Toggle persists immediately (save current fields too)
+    await saveLlmConfig();
+    refreshLlmStatus();
+  });
+  $("#llmSave")?.addEventListener("click", async () => { await saveLlmConfig(); toast("Сохранено", "ok"); refreshLlmStatus(); });
+  $("#llmTest")?.addEventListener("click", testLlm);
+  $("#llmAskBtn")?.addEventListener("click", askLlm);
+  $("#llmAskInput")?.addEventListener("keydown", (e) => { if (e.key === "Enter") askLlm(); });
+}
+
+async function saveLlmConfig() {
+  const llm = {
+    enabled:         $("#llmEnabled").checked,
+    base_url:        $("#llmBaseUrl").value.trim() || "https://integrate.api.nvidia.com/v1",
+    model:           $("#llmModel").value.trim() || "moonshotai/kimi-k2-instruct",
+    proxy:           $("#llmProxy").value.trim(),
+    system_prompt:   $("#llmSystemPrompt").value.trim(),
+    max_tokens:      Math.max(16, parseInt($("#llmMaxTokens").value, 10) || 200),
+    max_reply_chars: Math.max(50, parseInt($("#llmMaxChars").value, 10) || 600),
+    temperature:     Math.max(0, Math.min(2, parseFloat($("#llmTemp").value) || 0.6)),
+  };
+  // Only send api_key if the user typed something (don't wipe a saved key)
+  const key = $("#llmApiKey").value.trim();
+  if (key) llm.api_key = key;
+  try {
+    await api("/api/config", { method: "POST", body: { llm } });
+  } catch (e) { toast(e.message, "err"); }
+}
+
+async function refreshLlmStatus() {
+  let s;
+  try { s = await api("/api/llm/status"); }
+  catch (e) { setLlmStatus("err", "Ошибка: " + e.message); return; }
+
+  if (s.enabled && s.api_key_set) {
+    setLlmStatus("ok", `Включён · модель ${s.model}`);
+  } else if (s.enabled && !s.api_key_set) {
+    setLlmStatus("warn", "Включён, но не задан API-ключ");
+  } else {
+    setLlmStatus("idle", s.api_key_set ? "Выключен (ключ сохранён)" : "Выключен");
+  }
+  // Reflect config — don't stomp fields the user is editing
+  if ($("#llmEnabled")) $("#llmEnabled").checked = !!s.enabled;
+  if (!$("#llmApiKey").value && s.api_key_set) $("#llmApiKey").placeholder = "(ключ сохранён — впиши чтобы заменить)";
+  if (!$("#llmBaseUrl").value) $("#llmBaseUrl").value = s.base_url || "";
+  if (!$("#llmModel").value) $("#llmModel").value = s.model || "";
+  if (!$("#llmProxy").value && s.proxy) $("#llmProxy").value = s.proxy;
+  if (!$("#llmSystemPrompt").value) $("#llmSystemPrompt").value = s.system_prompt || "";
+  if (s.max_tokens != null && $("#llmMaxTokens").value === "200") $("#llmMaxTokens").value = s.max_tokens;
+  if (s.max_reply_chars != null && $("#llmMaxChars").value === "600") $("#llmMaxChars").value = s.max_reply_chars;
+  if (s.temperature != null && $("#llmTemp").value === "0.6") $("#llmTemp").value = s.temperature;
+}
+
+function setLlmStatus(kind, text) {
+  const dot = $("#llmStatus .tg-dot");
+  const txt = $("#llmStatusText");
+  if (dot) dot.className = `tg-dot tg-dot-${kind}`;
+  if (txt) txt.textContent = text;
+}
+
+async function testLlm() {
+  const out = $("#llmTestResult");
+  out.hidden = false; out.className = "tg-test-result";
+  out.innerHTML = `<span class="muted">⏳ Сохраняю и проверяю связь с LLM…</span>`;
+  await saveLlmConfig();
+  try {
+    const r = await api("/api/llm/test", { method: "POST" });
+    if (r.ok) {
+      out.className = "tg-test-result ok";
+      out.innerHTML = `✅ <strong>Связь есть</strong> · ${r.elapsed_seconds?.toFixed?.(1) ?? "?"} сек<div class="muted" style="margin-top:4px">Ответ: ${escapeHtml(r.answer || "")}</div>`;
+    } else {
+      out.className = "tg-test-result err";
+      out.innerHTML = `❌ <strong>Не удалось</strong><div class="muted" style="margin-top:4px">${escapeHtml(r.error || "—")}</div>`;
+    }
+  } catch (e) {
+    out.className = "tg-test-result err";
+    out.innerHTML = `❌ ${escapeHtml(e.message)}`;
+  }
+  refreshLlmStatus();
+}
+
+async function askLlm() {
+  const q = $("#llmAskInput").value.trim();
+  if (!q) return;
+  const out = $("#llmAskResult");
+  out.hidden = false;
+  out.innerHTML = `<span class="muted">🤔 Думаю…</span>`;
+  const btn = $("#llmAskBtn"); btn.disabled = true;
+  try {
+    const r = await api("/api/llm/ask", { method: "POST", body: { question: q } });
+    out.innerHTML = `<div class="llm-answer">${escapeHtml(r.answer || "")}</div>`;
+  } catch (e) {
+    out.innerHTML = `<span class="muted" style="color: var(--danger)">${escapeHtml(e.message)}</span>`;
+  } finally { btn.disabled = false; }
 }
 
 // ---------- Telegram status-bot (pinned message) ----------
