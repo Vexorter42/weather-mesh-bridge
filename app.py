@@ -126,7 +126,7 @@ def load_config() -> dict[str, Any]:
                 "chunk_delay": 10,
             },
             "message": {"language": "ru", "include_header": True, "use_emojis": False},
-            "commands": {"enabled": True},
+            "commands": {"enabled": True, "reply_delay_min_s": 5, "reply_delay_max_s": 10},
             "alerts": dict(weather_alerts.DEFAULTS),
             "schedules": [],
             "telegram": dict(TG_DEFAULTS),
@@ -178,6 +178,18 @@ def _handle_mesh_command(msg: dict[str, Any]) -> Optional[str]:
 
 BRIDGE.set_command_handler(_handle_mesh_command)
 
+
+def _apply_command_settings(cfg: dict[str, Any]) -> None:
+    """Push command-related runtime settings (reply back-off) into the bridge."""
+    c = cfg.get("commands") or {}
+    BRIDGE.set_command_reply_delay(
+        c.get("reply_delay_min_s", 5),
+        c.get("reply_delay_max_s", 10),
+    )
+
+
+_apply_command_settings(CONFIG)
+
 # Persistent state for weather-alerts dedup, plus background worker.
 ALERTS_STATE = weather_alerts.AlertsState(BASE_DIR / "alerts_state.json")
 weather_alerts.start_background_worker(load_config, BRIDGE, ALERTS_STATE)
@@ -197,9 +209,28 @@ def _telegram_forward(text: str, channel_index: int, destination: str) -> None:
     )
 
 
+def _telegram_summarize(text: str) -> Optional[str]:
+    """Condense a long Telegram message via the LLM before it goes to mesh.
+    Returns None (keep original) if the LLM isn't configured or fails."""
+    cfg = load_config()
+    if not llm.is_enabled(cfg):
+        return None
+    sys_prompt = (
+        "Ты сжимаешь экстренное оповещение для передачи по радио. Оставь только "
+        "суть: что, где, когда, что делать. Максимум 1-2 коротких предложения "
+        "по-русски, без вступлений, без воды, без эмодзи, без markdown."
+    )
+    try:
+        return llm.ask(text, cfg, system_override=sys_prompt)
+    except Exception:
+        log.exception("Telegram summarize via LLM failed — forwarding original")
+        return None
+
+
 TELEGRAM_BRIDGE = TelegramBridge(
     session_path=BASE_DIR / "telegram.session",
     mesh_send_callback=_telegram_forward,
+    summarize_callback=_telegram_summarize,
 )
 # Apply the persisted config now; auto-start if it's enabled and authorised.
 _tg_cfg_init = CONFIG.get("telegram") or {}
@@ -587,6 +618,7 @@ def api_set_config():
             cfg["llm"] = {**llm.DEFAULTS, **(cfg.get("llm") or {}), **payload["llm"]}
         save_config(cfg)
     BRIDGE.configure(cfg.get("mesh", {}) or {})
+    _apply_command_settings(cfg)
     # Push the freshest telegram config into the bridge. Reconfigure will
     # restart the worker if it's currently running.
     TELEGRAM_BRIDGE.configure(cfg.get("telegram") or {})

@@ -108,6 +108,13 @@ DEFAULTS = {
     #   "http://1.2.3.4:8080"                — plain HTTP proxy
     # Empty string = direct connection.
     "proxy": "",
+    # ---- LLM summarisation ----
+    # If enabled, long messages are condensed by the LLM before forwarding
+    # (only those at least `summarize_min_chars` long, to save tokens/latency
+    # on short alerts). Requires the LLM to be configured; falls back to the
+    # original text on any failure.
+    "summarize": False,
+    "summarize_min_chars": 200,
 }
 
 
@@ -333,13 +340,17 @@ def _strip_emoji(text: str) -> str:
 
 
 class TelegramBridge:
-    def __init__(self, session_path: Path, mesh_send_callback: Callable[[str, int, str], None]):
+    def __init__(self, session_path: Path, mesh_send_callback: Callable[[str, int, str], None],
+                 summarize_callback: Optional[Callable[[str], Optional[str]]] = None):
         """
         :param session_path: Path to telethon session file (only used in telethon mode)
         :param mesh_send_callback: function(text, channel_index, destination)
+        :param summarize_callback: optional function(text) -> condensed text (or
+            None to keep original). Used when `summarize` is enabled in config.
         """
         self._session_path = Path(session_path)
         self._mesh_send = mesh_send_callback
+        self._summarize = summarize_callback
 
         # --- common state ---
         self._cfg: dict[str, Any] = dict(DEFAULTS)
@@ -387,6 +398,21 @@ class TelegramBridge:
             if self._cfg.get("enabled"):
                 self.start()
 
+    def _maybe_summarize(self, body: str, enabled: bool, min_chars: int) -> str:
+        """Condense `body` via the LLM callback when enabled and long enough.
+        Returns the summary, or the original body on any failure/short input."""
+        if not enabled or not self._summarize:
+            return body
+        if len(body) < max(0, int(min_chars or 0)):
+            return body
+        try:
+            summary = self._summarize(body)
+        except Exception:
+            log.exception("Telegram summarize callback crashed")
+            return body
+        summary = (summary or "").strip()
+        return summary if summary else body
+
     def _record_seen(
         self, channel: str, text: str,
         status: str,   # "forwarded" | "throttled" | "no_keyword" | "no_geo" | "test"
@@ -433,6 +459,8 @@ class TelegramBridge:
                 "max_at_mentions": int(cfg.get("max_at_mentions") or 0),
                 "max_urls": int(cfg.get("max_urls") or 0),
                 "keep_first_paragraphs": int(cfg.get("keep_first_paragraphs") or 0),
+                "summarize": bool(cfg.get("summarize")),
+                "summarize_min_chars": int(cfg.get("summarize_min_chars") or 0),
             },
             "session_exists": self._session_path.exists(),
             "recent_matches": list(self._history),
@@ -536,6 +564,8 @@ class TelegramBridge:
                 max_ats = int(cfg.get("max_at_mentions") or 0)
                 max_urls = int(cfg.get("max_urls") or 0)
                 keep_paras = int(cfg.get("keep_first_paragraphs") or 0)
+                summarize = bool(cfg.get("summarize"))
+                summarize_min = int(cfg.get("summarize_min_chars") or 0)
 
                 for ch in channels:
                     if self._stop_event.is_set():
@@ -546,6 +576,7 @@ class TelegramBridge:
                             channel_idx, min_iv, first_pass, strip_emoji,
                             include_source, blocklist, strip_self_sig,
                             max_chars, max_ats, max_urls, keep_paras,
+                            summarize, summarize_min,
                         )
                     except Exception:
                         log.exception("Web-poll failed for %r", ch)
@@ -568,6 +599,8 @@ class TelegramBridge:
         max_ats: int = 5,
         max_urls: int = 3,
         keep_paras: int = 0,
+        summarize: bool = False,
+        summarize_min: int = 200,
     ) -> None:
         """Fetch one channel's preview page and process new messages."""
         ch = channel_name.lstrip("@").strip()
@@ -683,6 +716,8 @@ class TelegramBridge:
             # If stripping wiped the whole message (was emoji+ad-only) — skip
             if not body:
                 continue
+            # Optional LLM summarisation of long messages
+            body = self._maybe_summarize(body, summarize, summarize_min)
             # Hard length cap
             cap = max_chars if max_chars and max_chars > 0 else 600
             snippet = body if len(body) <= cap else body[:max(cap - 3, 0)] + "…"
@@ -811,6 +846,8 @@ class TelegramBridge:
         max_ats_flag = int(cfg.get("max_at_mentions") or 0)
         max_urls_flag = int(cfg.get("max_urls") or 0)
         keep_paras_flag = int(cfg.get("keep_first_paragraphs") or 0)
+        summarize_flag = bool(cfg.get("summarize"))
+        summarize_min_flag = int(cfg.get("summarize_min_chars") or 0)
 
         @self._client.on(events.NewMessage(chats=resolved))
         async def _handler(event):
@@ -863,6 +900,7 @@ class TelegramBridge:
                 body = _keep_first_paragraphs(body, keep_paras_flag)
                 if not body:
                     return
+                body = self._maybe_summarize(body, summarize_flag, summarize_min_flag)
                 cap = max_chars_flag if max_chars_flag and max_chars_flag > 0 else 600
                 snippet = body if len(body) <= cap else body[:max(cap - 3, 0)] + "…"
                 mesh_text = _build_mesh_text(prefix, src_name, snippet, include_source_flag)

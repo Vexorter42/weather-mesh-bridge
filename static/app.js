@@ -1156,13 +1156,22 @@ async function saveMessageStyle() {
     use_emojis: $("#useEmojis").checked,
     include_header: $("#includeHeader").checked,
   };
-  const cmds = { enabled: $("#commandsEnabled").checked };
+  let dmin = parseInt($("#cmdDelayMin").value, 10); if (!Number.isFinite(dmin)) dmin = 5;
+  let dmax = parseInt($("#cmdDelayMax").value, 10); if (!Number.isFinite(dmax)) dmax = 10;
+  if (dmax < dmin) dmax = dmin;
+  const cmds = {
+    enabled: $("#commandsEnabled").checked,
+    reply_delay_min_s: Math.max(0, dmin),
+    reply_delay_max_s: Math.max(0, dmax),
+  };
   CONFIG = await api("/api/config", { method: "POST", body: { message, commands: cmds } });
   toast("Сохранено", "ok");
 }
 $("#useEmojis").addEventListener("change", saveMessageStyle);
 $("#includeHeader").addEventListener("change", saveMessageStyle);
 $("#commandsEnabled").addEventListener("change", saveMessageStyle);
+$("#cmdDelayMin").addEventListener("change", saveMessageStyle);
+$("#cmdDelayMax").addEventListener("change", saveMessageStyle);
 
 // ---------- Mesh form ----------
 function updateConnectionFields() {
@@ -2513,6 +2522,8 @@ async function init() {
   $("#useEmojis").checked = !!CONFIG.message?.use_emojis;
   $("#includeHeader").checked = CONFIG.message?.include_header !== false;
   $("#commandsEnabled").checked = CONFIG.commands?.enabled !== false;
+  $("#cmdDelayMin").value = CONFIG.commands?.reply_delay_min_s ?? 5;
+  $("#cmdDelayMax").value = CONFIG.commands?.reply_delay_max_s ?? 10;
   updateConnectionFields();
   renderCurrentCity();
   buildDayButtons($("#newDays"), DAYS.map(d => d.k));
@@ -2903,6 +2914,8 @@ async function saveTelegramConfig() {
   const maxAts = parseInt($("#tgMaxAts").value, 10);
   const maxUrls = parseInt($("#tgMaxUrls").value, 10);
   const keepParas = parseInt($("#tgKeepParas").value, 10);
+  const summarize = $("#tgSummarize").checked;
+  const summarizeMin = parseInt($("#tgSummarizeMin").value, 10);
 
   const payload = {
     telegram: {
@@ -2926,6 +2939,8 @@ async function saveTelegramConfig() {
       max_at_mentions: Number.isFinite(maxAts) ? maxAts : 5,
       max_urls: Number.isFinite(maxUrls) ? maxUrls : 3,
       keep_first_paragraphs: Number.isFinite(keepParas) ? keepParas : 0,
+      summarize: summarize,
+      summarize_min_chars: Number.isFinite(summarizeMin) ? summarizeMin : 200,
     }
   };
   try {
@@ -3120,6 +3135,12 @@ async function refreshTelegramStatus() {
   }
   if ($("#tgKeepParas") && cfg.keep_first_paragraphs != null && $("#tgKeepParas").value === "0") {
     $("#tgKeepParas").value = cfg.keep_first_paragraphs;
+  }
+  if ($("#tgSummarize") && typeof cfg.summarize === "boolean") {
+    $("#tgSummarize").checked = cfg.summarize;
+  }
+  if ($("#tgSummarizeMin") && cfg.summarize_min_chars != null && $("#tgSummarizeMin").value === "200") {
+    $("#tgSummarizeMin").value = cfg.summarize_min_chars;
   }
 
   // Make sure the destination + channel selects have the freshest options

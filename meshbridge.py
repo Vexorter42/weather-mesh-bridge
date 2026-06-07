@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import glob
 import logging
+import random
 import threading
 import time
 from typing import Any, Callable, Optional
@@ -161,8 +162,25 @@ class MeshBridge:
         self._traceroute_waiters: dict[str, dict[str, Any]] = {}
         self._traceroute_lock = threading.Lock()
 
+        # Random back-off before answering a command. Replying the instant a
+        # request arrives often collides on the LoRa channel (the requester's
+        # radio / the mesh may still be busy), so we wait a random few seconds
+        # to let the air clear. Configurable via set_command_reply_delay().
+        self._reply_delay_min = 5.0
+        self._reply_delay_max = 10.0
+
     def set_chat_db(self, db: Any) -> None:
         self._db = db
+
+    def set_command_reply_delay(self, min_s: float, max_s: float) -> None:
+        """Configure the random back-off (seconds) before a command reply."""
+        try:
+            lo = max(0.0, float(min_s))
+            hi = max(lo, float(max_s))
+        except (TypeError, ValueError):
+            return
+        self._reply_delay_min = lo
+        self._reply_delay_max = hi
 
     def set_command_handler(self, fn: Optional[Callable[[dict], Optional[str]]]) -> None:
         self._command_handler = fn
@@ -728,6 +746,15 @@ class MeshBridge:
             return
         if not response:
             return
+
+        # LoRa back-off: wait a random few seconds before transmitting the reply
+        # so it doesn't collide with the requester still occupying the channel.
+        # Runs in this background thread, so the sleep blocks nothing important.
+        if self._reply_delay_max > 0:
+            delay = random.uniform(self._reply_delay_min, self._reply_delay_max)
+            if delay > 0:
+                log.info("Command reply back-off: waiting %.1fs before sending", delay)
+                time.sleep(delay)
 
         to_id = msg.get("to_id")
         is_dm = bool(to_id) and to_id not in ("^all", "all")

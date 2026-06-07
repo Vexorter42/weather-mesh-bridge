@@ -199,6 +199,17 @@
           <input type="checkbox" id="commandsEnabled">
           <span>Отвечать на команды в чате (/погода, /ping, /nodes, /help). `!` тоже работает.</span>
         </label>
+        <p class="hint" style="margin-top: 10px;">
+          ⏱ Пауза перед ответом на команду (случайная в диапазоне) — мгновенный ответ часто «сталкивается» в LoRa-эфире и теряется. 5–10 сек дают каналу освободиться.
+        </p>
+        <div class="grid2">
+          <label>Задержка ответа от, сек
+            <input type="number" id="cmdDelayMin" min="0" max="60" step="1" value="5">
+          </label>
+          <label>до, сек
+            <input type="number" id="cmdDelayMax" min="0" max="120" step="1" value="10">
+          </label>
+        </div>
       </section>
 
       <!-- Mesh connection -->
@@ -736,6 +747,15 @@
                 <input type="number" id="tgMaxUrls" min="0" max="50" step="1" value="3">
               </label>
             </div>
+
+            <div class="profile-section">Сжатие через ИИ <small>(нужен настроенный «ИИ-ассистент»)</small></div>
+            <label class="toggle-row">
+              <input type="checkbox" id="tgSummarize">
+              <span><strong>Сжимать длинные сообщения LLM</strong> — бот прогоняет длинный пост через ИИ и шлёт в mesh короткую выжимку (суть: что/где/когда). При сбое ИИ — отправляется оригинал.</span>
+            </label>
+            <label>Сжимать только длиннее, символов
+              <input type="number" id="tgSummarizeMin" min="50" max="2000" step="50" value="200">
+            </label>
 
             <div class="row">
               <button id="tgSave">💾 Сохранить</button>

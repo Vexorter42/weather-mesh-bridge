@@ -365,6 +365,49 @@ def cmd_ai(args, msg, bridge, cfg):
 
 
 @command(
+    "погодаии", "совет", "одеть", "wai",
+    help_text="/совет <вопрос> — умный совет по погоде от ИИ (учитывает прогноз)",
+)
+def cmd_smart_weather(args, msg, bridge, cfg):
+    """Answer a free-form question with the real forecast injected as context,
+    e.g. «/совет что надеть завтра?» → LLM replies using today+tomorrow data."""
+    if not llm.is_enabled(cfg):
+        return "ИИ выключен или не настроен. Включи в «Настройки → ИИ-ассистент»."
+    question = " ".join(args).strip() or "Что надеть и взять с собой сегодня?"
+
+    # Build a compact weather context block to feed the model.
+    try:
+        loc = cfg.get("location") or {}
+        if loc.get("latitude") is None:
+            return "Город не настроен — укажи его в настройках."
+        data = weather.fetch_weather(loc["latitude"], loc["longitude"], loc.get("timezone") or "auto")
+        ctx = weather.format_message(
+            data,
+            fields=["temp", "feels", "humidity", "wind", "precipitation",
+                    "forecast", "tomorrow_morning_evening"],
+            location_name=loc.get("name", ""),
+            include_header=True,
+            use_emojis=False,
+        )
+    except Exception as exc:
+        log.warning("/совет: weather fetch failed: %s", exc)
+        return f"Не смог получить прогноз: {exc}"
+
+    sys_prompt = (
+        "Ты — помощник по погоде в LoRa-рации. Тебе дают актуальный прогноз и "
+        "вопрос пользователя. Ответь по-русски кратко и практично: 1-3 коротких "
+        "предложения, конкретные советы (одежда, обувь, зонт и т.п.), без воды, "
+        "без markdown, без эмодзи."
+    )
+    prompt = f"Прогноз:\n{ctx}\n\nВопрос: {question}"
+    try:
+        return llm.ask(prompt, cfg, system_override=sys_prompt)
+    except Exception as exc:
+        log.warning("/совет failed: %s", exc)
+        return f"ИИ недоступен: {exc}"
+
+
+@command(
     "завтра", "tomorrow",
     help_text="/завтра [город] — прогноз на завтра",
 )
