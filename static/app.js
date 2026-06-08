@@ -943,18 +943,24 @@ let RADAR_FRAMES = [];     // [{ path, time }] — past + nowcast frames
 let RADAR_LAYER = null;    // currently shown Leaflet TileLayer
 let RADAR_INDEX = 0;       // current frame index in RADAR_FRAMES
 let RADAR_TIMER = null;    // animation interval
+let RADAR_HOST = "https://tilecache.rainviewer.com";  // overwritten from API
+let RADAR_PAST_COUNT = 0;  // how many of RADAR_FRAMES are past (rest = nowcast)
 
 async function loadRadarFrames() {
   try {
-    const r = await fetch("https://api.rainviewer.com/public/weather-maps.json");
-    const data = await r.json();
+    // Go through our own server (it proxies RainViewer) so the browser never
+    // hits the CDN directly — works even when the ISP resets that connection.
+    const data = await api("/api/radar/maps");
+    if (data.error) throw new Error(data.error);
+    if (data.host) RADAR_HOST = data.host;
     const past = data.radar?.past || [];
     const nowcast = data.radar?.nowcast || [];
     RADAR_FRAMES = past.concat(nowcast);
-    RADAR_INDEX = past.length - 1;   // start at "now"
+    RADAR_PAST_COUNT = past.length;
+    RADAR_INDEX = Math.max(0, past.length - 1);   // start at "now" (latest past)
     return true;
   } catch (e) {
-    toast("Не удалось загрузить радар RainViewer: " + e.message, "err");
+    toast("Не удалось загрузить радар: " + e.message, "err");
     return false;
   }
 }
@@ -963,29 +969,36 @@ function showRadarFrame(idx) {
   if (!MAP || !RADAR_FRAMES[idx]) return;
   if (RADAR_LAYER) MAP.removeLayer(RADAR_LAYER);
   const f = RADAR_FRAMES[idx];
-  // tile path is like "/v2/radar/1700000000" — base host is in the API response,
-  // but the static one https://tilecache.rainviewer.com works.
-  const url = `https://tilecache.rainviewer.com${f.path}/256/{z}/{x}/{y}/2/1_1.png`;
-  RADAR_LAYER = L.tileLayer(url, { opacity: 0.6, tileSize: 256, zIndex: 100 }).addTo(MAP);
+  // Tiles are proxied through our server: /api/radar/tile/{z}/{x}/{y}?path=…
+  // maxNativeZoom caps requests at RainViewer's radar coverage (it returns a
+  // "Zoom Level Not Supported" placeholder above that) — Leaflet upscales
+  // lower-zoom tiles instead.
+  const url = `/api/radar/tile/{z}/{x}/{y}?path=${encodeURIComponent(f.path)}&color=2`;
+  RADAR_LAYER = L.tileLayer(url, {
+    opacity: 0.7, tileSize: 256, zIndex: 400, maxNativeZoom: 8, maxZoom: 19,
+  }).addTo(MAP);
   RADAR_INDEX = idx;
   const tEl = $("#radarTime");
   if (tEl) {
     tEl.hidden = false;
     const d = new Date(f.time * 1000);
-    const isPast = idx < (RADAR_FRAMES.length - 3);   // nowcast frames are the last few
-    tEl.textContent = (isPast ? "" : "🔮 ") + d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    const isForecast = idx >= RADAR_PAST_COUNT;   // nowcast frames come after past
+    tEl.textContent = (isForecast ? "🔮 " : "") + d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   }
 }
 
 async function enableRadar() {
   if (!MAP) ensureMap();
-  if (!MAP) { toast("Карта не готова", "err"); return; }
+  if (!MAP) { toast("Карта не готова — открой вкладку Карта и попробуй снова", "err"); return; }
   if (!RADAR_FRAMES.length) {
     if (!await loadRadarFrames()) return;
   }
-  if (!RADAR_FRAMES.length) return;
+  if (!RADAR_FRAMES.length) { toast("Радар: нет кадров", "err"); return; }
   $("#radarPlay").hidden = false;
   showRadarFrame(RADAR_INDEX);
+  // Make sure Leaflet (re)requests tiles even if the map was just shown.
+  setTimeout(() => MAP.invalidateSize(), 60);
+  toast(`🌧 Радар включён · ${RADAR_FRAMES.length} кадров. Цветом — где идёт дождь (сейчас над твоим районом может быть чисто).`, "ok");
 }
 
 function disableRadar() {

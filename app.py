@@ -16,9 +16,10 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Optional
 
+import requests
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, Response, jsonify, render_template, request
 
 import commands
 # Mark process start time for /uptime — must be set before anything heavy runs.
@@ -1192,6 +1193,66 @@ def api_stats():
 @app.route("/api/health", methods=["GET"])
 def api_health():
     return jsonify({"ok": True, "time": datetime.utcnow().isoformat() + "Z"})
+
+
+# ---------------------------------------------------------------------------
+# RainViewer radar proxy
+# ---------------------------------------------------------------------------
+# Many ISPs (esp. RU) reset the browser's connection to RainViewer's CDN. We
+# proxy both the frames-manifest and the PNG tiles through this server so the
+# browser only ever talks to the Pi (LAN), and the Pi fetches RainViewer —
+# optionally via the same SOCKS5/VLESS proxy used for the Telegram bridge / LLM.
+
+RAINVIEWER_MAPS_URL = "https://api.rainviewer.com/public/weather-maps.json"
+RAINVIEWER_HOST = "https://tilecache.rainviewer.com"
+
+
+def _outbound_proxies() -> Optional[dict]:
+    """Reuse whatever proxy the user already configured (Telegram bridge, then
+    LLM). Empty → direct connection."""
+    cfg = load_config()
+    proxy = ((cfg.get("telegram") or {}).get("proxy")
+             or (cfg.get("llm") or {}).get("proxy") or "").strip()
+    if not proxy:
+        return None
+    if proxy.startswith("socks5://"):
+        proxy = proxy.replace("socks5://", "socks5h://", 1)
+    return {"http": proxy, "https": proxy}
+
+
+@app.route("/api/radar/maps", methods=["GET"])
+def api_radar_maps():
+    """Proxy the RainViewer frames manifest (past + nowcast)."""
+    try:
+        r = requests.get(RAINVIEWER_MAPS_URL, timeout=12, proxies=_outbound_proxies())
+        r.raise_for_status()
+        return jsonify(r.json())
+    except Exception as exc:
+        log.warning("Radar maps proxy failed: %s", exc)
+        return jsonify({"error": str(exc)}), 502
+
+
+@app.route("/api/radar/tile/<int:z>/<int:x>/<int:y>", methods=["GET"])
+def api_radar_tile(z: int, x: int, y: int):
+    """Proxy a single radar PNG tile. ?path=/v2/radar/<hash>&color=2"""
+    path = (request.args.get("path") or "").strip()
+    color = request.args.get("color", "2")
+    # Basic validation — only allow RainViewer radar/satellite paths.
+    if not path.startswith("/v2/"):
+        return Response(status=400)
+    if not color.isdigit():
+        color = "2"
+    url = f"{RAINVIEWER_HOST}{path}/256/{z}/{x}/{y}/{color}/1_1.png"
+    try:
+        r = requests.get(url, timeout=12, proxies=_outbound_proxies())
+        if r.status_code != 200:
+            return Response(status=r.status_code)
+        resp = Response(r.content, mimetype="image/png")
+        resp.headers["Cache-Control"] = "public, max-age=300"
+        return resp
+    except Exception as exc:
+        log.debug("Radar tile proxy failed (%s): %s", url, exc)
+        return Response(status=502)
 
 
 @app.route("/api/llm/status", methods=["GET"])
