@@ -4,17 +4,77 @@ API key not required. Docs: https://open-meteo.com/en/docs
 """
 from __future__ import annotations
 
+import functools
 import logging
+import time
 from typing import Any
 
 import requests
 
 log = logging.getLogger(__name__)
 
+
+def _ttl_cache(ttl_seconds: int):
+    """Memoise a function's successful (non-None) result per-args for ttl_seconds.
+
+    Drastically cuts Open-Meteo calls — the dashboard polls weather often and
+    Open-Meteo rate-limits per IP (429), which bites hard behind a shared VPN
+    exit node. Cached data is reused instead of re-fetching every time.
+    """
+    def deco(fn):
+        store: dict = {}
+
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            key = (args, tuple(sorted(kwargs.items())))
+            now = time.time()
+            hit = store.get(key)
+            if hit and now - hit[0] < ttl_seconds:
+                return hit[1]                          # fresh cache hit
+            try:
+                val = fn(*args, **kwargs)
+            except Exception:
+                if hit:                                # serve stale on failure (429/timeout)
+                    log.warning("%s failed; serving cached result (%.0fs old)",
+                                fn.__name__, now - hit[0])
+                    return hit[1]
+                raise
+            if val is not None:
+                store[key] = (now, val)
+                if len(store) > 64:
+                    for k in [k for k, v in store.items() if now - v[0] > ttl_seconds]:
+                        store.pop(k, None)
+                return val
+            return hit[1] if hit else val              # best-effort None → stale if any
+        return wrapper
+    return deco
+
 GEOCODE_URL = "https://geocoding-api.open-meteo.com/v1/search"
 FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
 MARINE_URL = "https://marine-api.open-meteo.com/v1/marine"
 AIR_QUALITY_URL = "https://air-quality-api.open-meteo.com/v1/air-quality"
+
+# Optional outbound proxy (Open-Meteo can be blocked by some ISPs). Set via
+# set_proxy() from app.py — reuses the same SOCKS5/VLESS proxy as the rest.
+_PROXIES: dict | None = None
+
+
+def set_proxy(url: str | None) -> None:
+    """Route all Open-Meteo requests through a SOCKS5/HTTP proxy. Empty = direct."""
+    global _PROXIES
+    url = (url or "").strip()
+    if not url:
+        _PROXIES = None
+        return
+    if url.startswith("socks5://"):
+        url = url.replace("socks5://", "socks5h://", 1)   # DNS through proxy
+    _PROXIES = {"http": url, "https": url}
+
+
+def _rget(*args, **kwargs):
+    """requests.get with the configured proxy applied (if any)."""
+    kwargs.setdefault("proxies", _PROXIES)
+    return requests.get(*args, **kwargs)
 
 # WMO weather codes split into (label, emoji) so emoji can be turned off.
 WMO_CODES_RU: dict[int, tuple[str, str]] = {
@@ -72,7 +132,7 @@ def search_city(query: str, language: str = "ru", count: int = 8) -> list[dict[s
     if not query or not query.strip():
         return []
     try:
-        r = requests.get(
+        r = _rget(
             GEOCODE_URL,
             params={"name": query.strip(), "count": count, "language": language, "format": "json"},
             timeout=10,
@@ -98,6 +158,7 @@ def search_city(query: str, language: str = "ru", count: int = 8) -> list[dict[s
     return out
 
 
+@_ttl_cache(300)            # 5 min — current weather changes slowly
 def fetch_weather(latitude: float, longitude: float, timezone: str = "auto") -> dict[str, Any]:
     """Fetch current weather + 2 days forecast (today + tomorrow) + hourly data."""
     params = {
@@ -149,11 +210,12 @@ def fetch_weather(latitude: float, longitude: float, timezone: str = "auto") -> 
         "forecast_days": 2,
         "wind_speed_unit": "ms",
     }
-    r = requests.get(FORECAST_URL, params=params, timeout=15)
+    r = _rget(FORECAST_URL, params=params, timeout=15)
     r.raise_for_status()
     return r.json()
 
 
+@_ttl_cache(1800)           # 30 min — water temp barely moves
 def fetch_water_temperature(
     latitude: float, longitude: float, timezone: str = "auto"
 ) -> dict[str, Any] | None:
@@ -169,7 +231,7 @@ def fetch_water_temperature(
     """
     # --- 1) Try the marine grid first
     try:
-        r = requests.get(
+        r = _rget(
             MARINE_URL,
             params={
                 "latitude": latitude,
@@ -189,7 +251,7 @@ def fetch_water_temperature(
 
     # --- 2) Fallback: estimate from 7-day mean air temperature
     try:
-        r = requests.get(
+        r = _rget(
             FORECAST_URL,
             params={
                 "latitude": latitude,
@@ -232,6 +294,7 @@ def fetch_water_temperature(
     return {"value": round(water, 1), "source": "estimated"}
 
 
+@_ttl_cache(900)            # 15 min
 def fetch_air_quality(
     latitude: float, longitude: float, timezone: str = "auto"
 ) -> dict[str, Any] | None:
@@ -239,7 +302,7 @@ def fetch_air_quality(
     Quality API. Returns a dict with whatever fields the response had, or None.
     """
     try:
-        r = requests.get(
+        r = _rget(
             AIR_QUALITY_URL,
             params={
                 "latitude": latitude,
@@ -275,12 +338,13 @@ def fetch_air_quality(
     return out
 
 
+@_ttl_cache(1800)           # 30 min — yesterday's data is static
 def fetch_yesterday(
     latitude: float, longitude: float, timezone: str = "auto"
 ) -> dict[str, Any] | None:
     """Pull yesterday's daily min/max/weather_code for the "vs yesterday" diff."""
     try:
-        r = requests.get(
+        r = _rget(
             FORECAST_URL,
             params={
                 "latitude": latitude,

@@ -46,6 +46,7 @@
     <button class="tab-btn" data-tab="settings"><span class="nav-icon" aria-hidden="true">⚙️</span><span class="nav-label">Настройки</span></button>
     <button class="tab-btn" data-tab="chat"><span class="nav-icon" aria-hidden="true">💬</span><span class="nav-label">Чат</span><span class="badge" id="chatBadge" hidden>0</span></button>
     <button class="tab-btn" data-tab="misc"><span class="nav-icon" aria-hidden="true">🧪</span><span class="nav-label">Прочее</span></button>
+    <button class="tab-btn" data-tab="proxy"><span class="nav-icon" aria-hidden="true">🌐</span><span class="nav-label">Прокси</span></button>
   </nav>
 
   <main>
@@ -453,9 +454,10 @@
                 <input type="text" id="llmModel" placeholder="moonshotai/kimi-k2">
               </label>
             </div>
-            <label>Прокси <small>(пусто = напрямую; можно socks5://127.0.0.1:10808)</small>
-              <input type="text" id="llmProxy" placeholder="пусто или socks5://host:port">
-            </label>
+            <p class="hint">
+              🌐 Прокси для LLM-API настраивается во вкладке <strong>Прокси</strong>
+              (тумблер «LLM»).
+            </p>
 
             <div class="profile-section">Поведение</div>
             <label>System-промпт <small>(инструкция модели — держи ответы короткими для LoRa!)</small>
@@ -548,14 +550,13 @@
             </label>
 
             <div class="profile-section">Параметры обновления</div>
-            <div class="grid2">
-              <label>Интервал обновления, сек <small>(минимум 15)</small>
-                <input type="number" id="tgsUpdateSec" min="15" max="3600" step="15" value="60">
-              </label>
-              <label>Прокси <small>(пусто = использовать прокси из «Telegram-мост»)</small>
-                <input type="text" id="tgsProxy" placeholder="socks5://127.0.0.1:10808 или пусто">
-              </label>
-            </div>
+            <label>Интервал обновления, сек <small>(минимум 15)</small>
+              <input type="number" id="tgsUpdateSec" min="15" max="3600" step="15" value="60">
+            </label>
+            <p class="hint">
+              🌐 Прокси для статус-бота настраивается во вкладке <strong>Прокси</strong>
+              (тумблер «Статус-бот»).
+            </p>
 
             <label class="toggle-row">
               <input type="checkbox" id="tgsAutoPin" checked>
@@ -649,17 +650,13 @@
               </div>
             </div>
 
-            <div class="profile-section">Прокси <small>(если t.me у твоего провайдера зарезано)</small></div>
+            <div class="profile-section">Прокси</div>
             <p class="hint">
-              Формат URL. Примеры:<br>
-              <code>socks5://127.0.0.1:1080</code> — локальный SOCKS5 (например, от <code>ssh -D</code>)<br>
-              <code>socks5://user:pass@1.2.3.4:1080</code> — удалённый с авторизацией<br>
-              <code>http://1.2.3.4:8080</code> — обычный HTTP-прокси<br>
-              Пусто — ходить напрямую без прокси.
+              Если t.me у твоего провайдера зарезано — настрой общий прокси во вкладке
+              <strong>🌐 Прокси</strong> и включи там тумблер «Telegram-мост».
             </p>
             <div class="row">
-              <input type="text" id="tgProxy" placeholder="socks5://host:port или пусто" style="flex: 1;">
-              <button id="tgTest" class="ghost">🔍 Проверить</button>
+              <button id="tgTest" class="ghost">🔍 Проверить доступ к t.me</button>
             </div>
             <div id="tgTestResult" class="tg-test-result" hidden></div>
 
@@ -753,9 +750,14 @@
               <input type="checkbox" id="tgSummarize">
               <span><strong>Сжимать длинные сообщения LLM</strong> — бот прогоняет длинный пост через ИИ и шлёт в mesh короткую выжимку (суть: что/где/когда). При сбое ИИ — отправляется оригинал.</span>
             </label>
-            <label>Сжимать только длиннее, символов
-              <input type="number" id="tgSummarizeMin" min="50" max="2000" step="50" value="200">
-            </label>
+            <div class="grid2">
+              <label>Сжимать, если длиннее <small>(символов)</small>
+                <input type="number" id="tgSummarizeMin" min="50" max="2000" step="50" value="200">
+              </label>
+              <label>Сжимать до <small>(символов, ~100 = один LoRa-пакет)</small>
+                <input type="number" id="tgSummarizeTarget" min="40" max="800" step="10" value="100">
+              </label>
+            </div>
 
             <div class="row">
               <button id="tgSave">💾 Сохранить</button>
@@ -795,6 +797,63 @@
             </details>
           </div>
         </details>
+      </section>
+    </div>
+
+    <!-- ===================== PROXY ===================== -->
+    <div class="tab-panel" data-tab="proxy">
+      <section class="card">
+        <h2>🌐 Прокси</h2>
+        <p class="hint">
+          Один общий прокси (VLESS/Xray, SSH-туннель и т.п.) на всё приложение.
+          Ниже выбираешь, какие сервисы через него ходят — остальные идут напрямую.
+          Полезно, если провайдер режет Open-Meteo, RainViewer, t.me или LLM-API.
+        </p>
+
+        <div class="profile-section">Адрес прокси</div>
+        <p class="hint">
+          Формат URL. Примеры:<br>
+          <code>socks5://127.0.0.1:10808</code> — локальный SOCKS5 (Xray/VLESS, <code>ssh -D</code>)<br>
+          <code>socks5://user:pass@1.2.3.4:1080</code> — удалённый с авторизацией<br>
+          <code>http://1.2.3.4:8080</code> — обычный HTTP-прокси<br>
+          Пусто — всё ходит напрямую (тумблеры ниже игнорируются).
+        </p>
+        <div class="row">
+          <input type="text" id="proxyUrl" placeholder="socks5://127.0.0.1:10808 или пусто" style="flex: 1;">
+          <button id="proxyTest" class="ghost">🔍 Проверить</button>
+        </div>
+        <div id="proxyTestResult" class="tg-test-result" hidden></div>
+
+        <div class="profile-section">Что пускать через прокси</div>
+        <label class="toggle-row">
+          <input type="checkbox" id="proxyUseWeather" checked>
+          <span><strong>Погода</strong> — Open-Meteo (прогноз, качество воздуха, УФ, вода, вчера)</span>
+        </label>
+        <label class="toggle-row">
+          <input type="checkbox" id="proxyUseRadar" checked>
+          <span><strong>Радар осадков</strong> — тайлы RainViewer</span>
+        </label>
+        <label class="toggle-row">
+          <input type="checkbox" id="proxyUseTelegram" checked>
+          <span><strong>Telegram-мост</strong> — чтение каналов (t.me / MTProto)</span>
+        </label>
+        <label class="toggle-row">
+          <input type="checkbox" id="proxyUseLlm" checked>
+          <span><strong>LLM</strong> — запросы к ИИ-API (<code>/ai</code>, сжатие алертов)</span>
+        </label>
+        <label class="toggle-row">
+          <input type="checkbox" id="proxyUseTgstatus" checked>
+          <span><strong>Статус-бот</strong> — Telegram-бот, правящий закреплённое сообщение</span>
+        </label>
+
+        <div class="row" style="margin-top: 14px;">
+          <button id="proxySave" class="primary">💾 Сохранить</button>
+          <button id="proxyRefresh" class="ghost">↻ Обновить</button>
+        </div>
+        <p class="hint" style="margin-top: 8px;">
+          ⚠️ Прокси часто общий и rate-лимитится. Если Open-Meteo отдаёт <code>429</code> —
+          сервер кэширует прогноз и отдаёт последнюю удачную выдачу.
+        </p>
       </section>
     </div>
   </main>

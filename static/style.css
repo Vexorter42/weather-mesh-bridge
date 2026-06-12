@@ -2081,6 +2081,7 @@ button.run-now:disabled { opacity: 0.5; cursor: wait; }
 
 /* ---------- "Прочее" / Experimental section ---------- */
 .experiment {
+  position: relative;
   margin-top: 14px;
   border: 1px solid var(--glass-border);
   border-radius: var(--radius);
@@ -2088,26 +2089,56 @@ button.run-now:disabled { opacity: 0.5; cursor: wait; }
   backdrop-filter: blur(10px);
   -webkit-backdrop-filter: blur(10px);
   overflow: hidden;
-  transition: border-color var(--transition);
+  transition: border-color var(--transition), box-shadow var(--transition), transform var(--transition);
 }
-.experiment[open] { border-color: var(--glass-border-strong); }
+.experiment:hover { border-color: var(--glass-border-strong); }
+.experiment[open] {
+  border-color: var(--glass-border-strong);
+  box-shadow: var(--shadow-md);
+}
+/* accent bar down the left edge when opened */
+.experiment[open]::before {
+  content: "";
+  position: absolute;
+  left: 0; top: 0; bottom: 0;
+  width: 3px;
+  background: linear-gradient(180deg, var(--accent), var(--magenta), var(--teal));
+}
 .experiment > summary {
   cursor: pointer;
-  padding: 14px 18px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 15px 18px;
   list-style: none;
   user-select: none;
+  font-size: 0.95rem;
+  transition: background var(--transition);
 }
+.experiment > summary:hover { background: var(--glass-bg); }
+.experiment[open] > summary { background: var(--glass-bg); }
 .experiment > summary::-webkit-details-marker { display: none; }
+/* round chevron button on the right */
 .experiment > summary::after {
   content: "▾";
-  float: right;
+  margin-left: auto;
+  flex: 0 0 auto;
+  width: 26px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid var(--glass-border);
   color: var(--muted);
-  font-size: 1.05rem;
-  margin-top: 1px;
-  transition: transform var(--transition);
+  font-size: 0.85rem;
+  transition: transform var(--transition), color var(--transition), background var(--transition);
 }
-.experiment[open] > summary::after { transform: rotate(180deg); }
+.experiment > summary:hover::after { color: var(--text); background: var(--glass-bg-strong); }
+.experiment[open] > summary::after { transform: rotate(180deg); color: var(--accent); }
 .experiment > summary .toggle-row {
+  flex: 1;
   margin: 0;
   padding: 0;
   background: transparent;
@@ -2115,8 +2146,9 @@ button.run-now:disabled { opacity: 0.5; cursor: wait; }
 }
 .experiment > summary .toggle-row:hover { background: transparent; }
 .experiment-body {
-  padding: 4px 18px 18px;
+  padding: 6px 18px 20px;
   border-top: 1px dashed var(--glass-border);
+  animation: panel-in 0.22s ease;
 }
 
 .tg-status {

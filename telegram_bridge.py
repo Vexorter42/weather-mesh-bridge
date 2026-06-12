@@ -114,7 +114,11 @@ DEFAULTS = {
     # on short alerts). Requires the LLM to be configured; falls back to the
     # original text on any failure.
     "summarize": False,
+    # Only summarise messages at least this long (short alerts pass through).
     "summarize_min_chars": 200,
+    # Target length of the summary — the LLM is told to fit within this, and
+    # the result is hard-capped to it. ~100 keeps it to a single LoRa packet.
+    "summarize_target_chars": 100,
 }
 
 
@@ -461,6 +465,7 @@ class TelegramBridge:
                 "keep_first_paragraphs": int(cfg.get("keep_first_paragraphs") or 0),
                 "summarize": bool(cfg.get("summarize")),
                 "summarize_min_chars": int(cfg.get("summarize_min_chars") or 0),
+                "summarize_target_chars": int(cfg.get("summarize_target_chars") or 100),
             },
             "session_exists": self._session_path.exists(),
             "recent_matches": list(self._history),

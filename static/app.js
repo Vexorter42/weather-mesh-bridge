@@ -103,6 +103,8 @@ $$(".tab-btn").forEach(btn => {
       refreshUpdateInfo();
       refreshTgStatusBot();
       refreshLlmStatus();
+    } else if (CURRENT_TAB === "proxy") {
+      loadProxyConfig();
     }
   });
 });
@@ -121,13 +123,15 @@ async function refreshDashboard() {
     ]);
     KNOWN_NODES = Array.isArray(nodes) ? nodes : [];
     KNOWN_CHANNELS = Array.isArray(channels) ? channels : [];
-    renderDashboard(stats, KNOWN_NODES);
-    renderWeatherWidget(wxCur);
-    renderHourlyChart(wxHourly);
+    // Populate selectors FIRST — so a later render error (weather widget /
+    // hourly chart) can't leave the channel/destination dropdowns empty.
     populateDestinationSelectors(KNOWN_NODES);
     populateTgChannelSelect();
     rebuildConversations();
     renderConvList();
+    renderDashboard(stats, KNOWN_NODES);
+    renderWeatherWidget(wxCur);
+    renderHourlyChart(wxHourly);
   } catch (e) { /* silent — dashboard isn't critical */ }
 }
 
@@ -2582,6 +2586,72 @@ async function init() {
   wireUpdatePanel();
   wireTgStatusBotPanel();
   wireLlmPanel();
+  wireProxyPanel();
+}
+
+// ---------- Прокси (общий, с тумблерами по сервисам) ----------
+
+function wireProxyPanel() {
+  $("#proxySave")?.addEventListener("click", saveProxyConfig);
+  $("#proxyRefresh")?.addEventListener("click", loadProxyConfig);
+  $("#proxyTest")?.addEventListener("click", testProxy);
+}
+
+async function loadProxyConfig() {
+  let cfg;
+  try { cfg = await api("/api/config"); }
+  catch (e) { toast(e.message, "err"); return; }
+  const p = cfg.proxy || {};
+  if ($("#proxyUrl")) $("#proxyUrl").value = p.url || "";
+  const set = (id, v) => { const el = $(id); if (el) el.checked = v !== false; };
+  set("#proxyUseWeather",  p.use_weather);
+  set("#proxyUseRadar",    p.use_radar);
+  set("#proxyUseTelegram", p.use_telegram);
+  set("#proxyUseLlm",      p.use_llm);
+  set("#proxyUseTgstatus", p.use_tgstatus);
+}
+
+async function saveProxyConfig() {
+  const proxy = {
+    url:          $("#proxyUrl").value.trim(),
+    use_weather:  $("#proxyUseWeather").checked,
+    use_radar:    $("#proxyUseRadar").checked,
+    use_telegram: $("#proxyUseTelegram").checked,
+    use_llm:      $("#proxyUseLlm").checked,
+    use_tgstatus: $("#proxyUseTgstatus").checked,
+  };
+  try {
+    await api("/api/config", { method: "POST", body: { proxy } });
+    toast("Прокси сохранён", "ok");
+  } catch (e) { toast(e.message, "err"); }
+}
+
+async function testProxy() {
+  const url = $("#proxyUrl").value.trim();
+  const out = $("#proxyTestResult");
+  out.hidden = false;
+  out.className = "tg-test-result";
+  out.innerHTML = url
+    ? `<span class="muted">⏳ Проверяю выход через прокси…</span>`
+    : `<span class="muted">⏳ Проверяю прямое соединение…</span>`;
+  try {
+    const r = await api("/api/proxy/test", { method: "POST", body: { url } });
+    const via = r.via_proxy ? "через прокси" : "напрямую";
+    if (r.ok) {
+      out.className = "tg-test-result ok";
+      out.innerHTML =
+        `✅ <strong>Связь есть</strong> — ${via}` +
+        `<div class="muted" style="margin-top:4px">Внешний IP: ${escapeHtml(r.ip || "?")}</div>`;
+    } else {
+      out.className = "tg-test-result err";
+      out.innerHTML =
+        `❌ <strong>Не удалось</strong> — ${via}` +
+        `<div class="muted" style="margin-top:4px">${escapeHtml(r.error || "?")}</div>`;
+    }
+  } catch (e) {
+    out.className = "tg-test-result err";
+    out.innerHTML = `❌ ${escapeHtml(e.message)}`;
+  }
 }
 
 // ---------- LLM / AI assistant ----------
@@ -2603,7 +2673,6 @@ async function saveLlmConfig() {
     enabled:         $("#llmEnabled").checked,
     base_url:        $("#llmBaseUrl").value.trim() || "https://integrate.api.nvidia.com/v1",
     model:           $("#llmModel").value.trim() || "moonshotai/kimi-k2-instruct",
-    proxy:           $("#llmProxy").value.trim(),
     system_prompt:   $("#llmSystemPrompt").value.trim(),
     max_tokens:      Math.max(16, parseInt($("#llmMaxTokens").value, 10) || 200),
     max_reply_chars: Math.max(50, parseInt($("#llmMaxChars").value, 10) || 600),
@@ -2634,7 +2703,6 @@ async function refreshLlmStatus() {
   if (!$("#llmApiKey").value && s.api_key_set) $("#llmApiKey").placeholder = "(ключ сохранён — впиши чтобы заменить)";
   if (!$("#llmBaseUrl").value) $("#llmBaseUrl").value = s.base_url || "";
   if (!$("#llmModel").value) $("#llmModel").value = s.model || "";
-  if (!$("#llmProxy").value && s.proxy) $("#llmProxy").value = s.proxy;
   if (!$("#llmSystemPrompt").value) $("#llmSystemPrompt").value = s.system_prompt || "";
   if (s.max_tokens != null && $("#llmMaxTokens").value === "200") $("#llmMaxTokens").value = s.max_tokens;
   if (s.max_reply_chars != null && $("#llmMaxChars").value === "600") $("#llmMaxChars").value = s.max_reply_chars;
@@ -2729,7 +2797,6 @@ async function saveTgStatusConfig() {
       bot_token:       $("#tgsToken").value.trim(),
       chat_id:         $("#tgsChatId").value.trim(),
       update_seconds:  Math.max(15, parseInt($("#tgsUpdateSec").value, 10) || 60),
-      proxy:           $("#tgsProxy").value.trim(),
       auto_pin:        $("#tgsAutoPin").checked,
       show_weather:    $("#tgsShowWeather").checked,
       show_mesh_stats: $("#tgsShowMesh").checked,
@@ -2765,7 +2832,6 @@ async function refreshTgStatusBot() {
   if (!$("#tgsToken").value && c.bot_token_set) $("#tgsToken").placeholder = "(сохранено)";
   if (!$("#tgsChatId").value && c.chat_id) $("#tgsChatId").value = c.chat_id;
   if (c.update_seconds != null && $("#tgsUpdateSec").value === "60") $("#tgsUpdateSec").value = c.update_seconds;
-  if (c.proxy && !$("#tgsProxy").value) $("#tgsProxy").value = c.proxy;
   if (typeof c.auto_pin === "boolean")  $("#tgsAutoPin").checked = c.auto_pin;
   if (typeof c.show_weather === "boolean") $("#tgsShowWeather").checked = c.show_weather;
   if (typeof c.show_mesh_stats === "boolean") $("#tgsShowMesh").checked = c.show_mesh_stats;
@@ -2915,7 +2981,6 @@ async function saveTelegramConfig() {
   const pollIv = Math.max(15, parseInt($("#tgPollInterval").value, 10) || 60);
   const prefix = $("#tgPrefix").value.trim() || "🚨 TG";
 
-  const proxy = $("#tgProxy").value.trim();
   const broadcastTo = $("#tgDest").value || "broadcast";
   const channelIndex = parseInt($("#tgChannelIndex").value, 10);
   const stripEmoji = $("#tgStripEmoji").checked;
@@ -2929,6 +2994,7 @@ async function saveTelegramConfig() {
   const keepParas = parseInt($("#tgKeepParas").value, 10);
   const summarize = $("#tgSummarize").checked;
   const summarizeMin = parseInt($("#tgSummarizeMin").value, 10);
+  const summarizeTarget = parseInt($("#tgSummarizeTarget").value, 10);
 
   const payload = {
     telegram: {
@@ -2941,7 +3007,6 @@ async function saveTelegramConfig() {
       min_interval_seconds: minIv,
       poll_interval_seconds: pollIv,
       forward_prefix: prefix,
-      proxy,
       broadcast_to: broadcastTo,
       channel_index: Number.isFinite(channelIndex) ? channelIndex : 0,
       strip_emoji: stripEmoji,
@@ -2954,6 +3019,7 @@ async function saveTelegramConfig() {
       keep_first_paragraphs: Number.isFinite(keepParas) ? keepParas : 0,
       summarize: summarize,
       summarize_min_chars: Number.isFinite(summarizeMin) ? summarizeMin : 200,
+      summarize_target_chars: Number.isFinite(summarizeTarget) ? summarizeTarget : 100,
     }
   };
   try {
@@ -2964,14 +3030,12 @@ async function saveTelegramConfig() {
 }
 
 async function testTelegramFetch() {
-  // Save the current proxy value first — so the test uses what user just typed.
-  const proxy = $("#tgProxy").value.trim();
+  // Proxy now lives in the central «Прокси» tab — the server uses it directly.
   const out = $("#tgTestResult");
   out.hidden = false;
   out.className = "tg-test-result";
-  out.innerHTML = `<span class="muted">⏳ Сохраняю прокси и пробую открыть t.me/s/durov…</span>`;
+  out.innerHTML = `<span class="muted">⏳ Пробую открыть t.me/s/durov…</span>`;
   try {
-    await api("/api/config", { method: "POST", body: { telegram: { proxy } } });
     const r = await api("/api/telegram/test", { method: "POST", body: { channel: "durov" } });
     const via = r.via_proxy ? `через прокси (${escapeHtml(r.proxy || "?")})` : "напрямую";
     const elapsed = r.elapsed_seconds != null ? `${r.elapsed_seconds.toFixed(1)} сек` : "—";
@@ -3069,6 +3133,10 @@ async function testTelegramSendMesh() {
 }
 
 async function refreshTelegramStatus() {
+  // Make sure the channel/destination dropdowns are filled even if the user
+  // opened "Прочее" without the dashboard having loaded (falls back to 0–7).
+  populateTgChannelSelect();
+  if (KNOWN_NODES.length) populateDestinationSelectors(KNOWN_NODES);
   try {
     TG_STATE = await api("/api/telegram/status");
   } catch (e) {
@@ -3122,9 +3190,6 @@ async function refreshTelegramStatus() {
   if (cfg.forward_prefix && $("#tgPrefix").value === "🚨 TG") {
     $("#tgPrefix").value = cfg.forward_prefix;
   }
-  if (cfg.proxy && !$("#tgProxy").value) {
-    $("#tgProxy").value = cfg.proxy;
-  }
   if ($("#tgStripEmoji") && typeof cfg.strip_emoji === "boolean") {
     $("#tgStripEmoji").checked = cfg.strip_emoji;
   }
@@ -3154,6 +3219,9 @@ async function refreshTelegramStatus() {
   }
   if ($("#tgSummarizeMin") && cfg.summarize_min_chars != null && $("#tgSummarizeMin").value === "200") {
     $("#tgSummarizeMin").value = cfg.summarize_min_chars;
+  }
+  if ($("#tgSummarizeTarget") && cfg.summarize_target_chars != null && $("#tgSummarizeTarget").value === "100") {
+    $("#tgSummarizeTarget").value = cfg.summarize_target_chars;
   }
 
   // Make sure the destination + channel selects have the freshest options

@@ -45,6 +45,53 @@ PRESETS_PATH = BASE_DIR / "presets.local.json"
 
 DAYS_ORDER = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 
+# Central outbound-proxy config. One URL, per-service on/off toggles.
+PROXY_DEFAULTS = {
+    "url": "",             # socks5://host:port / http://host:port — empty = direct
+    "use_weather": True,   # Open-Meteo (forecast/air/water/yesterday)
+    "use_radar": True,     # RainViewer tiles
+    "use_telegram": True,  # Telegram bridge (t.me scrape / MTProto)
+    "use_llm": True,       # LLM API
+    "use_tgstatus": True,  # Telegram status-bot
+}
+
+
+def _proxy_for(cfg: dict[str, Any], service: str) -> str:
+    """Effective proxy URL for one service. The central `proxy` section is the
+    single source of truth: if its `url` is set, each service is proxied only
+    when its `use_<service>` toggle is on. Legacy configs without a central
+    section fall back to the old per-section proxy fields."""
+    p = cfg.get("proxy")
+    if isinstance(p, dict):
+        url = (p.get("url") or "").strip()
+        if not url:
+            return ""
+        return url if p.get(f"use_{service}", True) else ""
+    # Legacy fallback — older configs stored the proxy per section.
+    if service == "telegram":
+        return ((cfg.get("telegram") or {}).get("proxy") or "").strip()
+    if service == "llm":
+        return ((cfg.get("llm") or {}).get("proxy") or "").strip()
+    if service == "tgstatus":
+        return ((cfg.get("telegram_status") or {}).get("proxy") or "").strip()
+    # weather / radar previously reused telegram's (then llm's) proxy.
+    return ((cfg.get("telegram") or {}).get("proxy")
+            or (cfg.get("llm") or {}).get("proxy") or "").strip()
+
+
+def _propagate_proxy(cfg: dict[str, Any]) -> dict[str, Any]:
+    """Resolve the central proxy into each service's own `proxy` field so the
+    Telegram bridge / LLM client / status-bot (which read their sub-config
+    independently via load_config) transparently honour the per-service
+    toggles, without those modules needing to know about the central section."""
+    if isinstance(cfg.get("telegram"), dict):
+        cfg["telegram"]["proxy"] = _proxy_for(cfg, "telegram")
+    if isinstance(cfg.get("llm"), dict):
+        cfg["llm"]["proxy"] = _proxy_for(cfg, "llm")
+    if isinstance(cfg.get("telegram_status"), dict):
+        cfg["telegram_status"]["proxy"] = _proxy_for(cfg, "tgstatus")
+    return cfg
+
 
 def _apply_local_presets() -> None:
     """Seed Telegram-bridge keyword/geo/blocklist defaults from an optional,
@@ -102,7 +149,7 @@ def _migrate_fields(fields: list[str] | None) -> list[str]:
 
 
 def _migrate_config(cfg: dict[str, Any]) -> tuple[dict[str, Any], bool]:
-    """Migrate legacy field keys in schedules. Returns (cfg, changed)."""
+    """Migrate legacy field keys in schedules + seed central proxy. Returns (cfg, changed)."""
     changed = False
     for slot in cfg.get("schedules", []) or []:
         old = slot.get("fields") or []
@@ -110,6 +157,17 @@ def _migrate_config(cfg: dict[str, Any]) -> tuple[dict[str, Any], bool]:
         if new != old:
             slot["fields"] = new
             changed = True
+    # Seed the central proxy section from old per-section proxy fields, so an
+    # upgraded config keeps working through the proxy it already had set.
+    if not isinstance(cfg.get("proxy"), dict):
+        legacy = ((cfg.get("telegram") or {}).get("proxy")
+                  or (cfg.get("llm") or {}).get("proxy")
+                  or (cfg.get("telegram_status") or {}).get("proxy") or "").strip()
+        cfg["proxy"] = {**PROXY_DEFAULTS, "url": legacy}
+        changed = True
+    else:
+        for k, v in PROXY_DEFAULTS.items():
+            cfg["proxy"].setdefault(k, v)
     return cfg, changed
 
 
@@ -133,12 +191,14 @@ def load_config() -> dict[str, Any]:
             "telegram": dict(TG_DEFAULTS),
             "telegram_status": dict(TGS_DEFAULTS),
             "llm": dict(llm.DEFAULTS),
+            "proxy": dict(PROXY_DEFAULTS),
         }
     with CONFIG_PATH.open("r", encoding="utf-8") as f:
         cfg = json.load(f)
     cfg, changed = _migrate_config(cfg)
     if changed:
         save_config(cfg)
+    _propagate_proxy(cfg)
     return cfg
 
 
@@ -189,7 +249,14 @@ def _apply_command_settings(cfg: dict[str, Any]) -> None:
     )
 
 
+def _apply_weather_proxy(cfg: dict[str, Any]) -> None:
+    """Route Open-Meteo requests through the proxy when `use_weather` is on
+    (some ISPs block api.open-meteo.com)."""
+    weather.set_proxy(_proxy_for(cfg, "weather"))
+
+
 _apply_command_settings(CONFIG)
+_apply_weather_proxy(CONFIG)
 
 # Persistent state for weather-alerts dedup, plus background worker.
 ALERTS_STATE = weather_alerts.AlertsState(BASE_DIR / "alerts_state.json")
@@ -216,16 +283,30 @@ def _telegram_summarize(text: str) -> Optional[str]:
     cfg = load_config()
     if not llm.is_enabled(cfg):
         return None
-    sys_prompt = (
-        "Ты сжимаешь экстренное оповещение для передачи по радио. Оставь только "
-        "суть: что, где, когда, что делать. Максимум 1-2 коротких предложения "
-        "по-русски, без вступлений, без воды, без эмодзи, без markdown."
-    )
     try:
-        return llm.ask(text, cfg, system_override=sys_prompt)
+        target = int((cfg.get("telegram") or {}).get("summarize_target_chars") or 100)
+    except (TypeError, ValueError):
+        target = 100
+    target = max(40, min(target, 800))
+    sys_prompt = (
+        "Ты — фильтр-сжиматель. На вход даётся сообщение, на выход — его краткая "
+        "суть на РУССКОМ языке одной фразой (что, где, когда, что делать). "
+        f"Не длиннее {target} символов. "
+        "ВЫВОДИ ТОЛЬКО готовую фразу-выжимку и больше ничего: без рассуждений, "
+        "без пояснений, без преамбул вроде «The user wants…» или «Вот сводка», "
+        "без кавычек, без эмодзи, без markdown. Сразу текст выжимки."
+    )
+    user_msg = f"Сожми это сообщение:\n\n{text}"
+    try:
+        summary = llm.ask(user_msg, cfg, system_override=sys_prompt)
     except Exception:
         log.exception("Telegram summarize via LLM failed — forwarding original")
         return None
+    # Hard-cap in case the model overshoots the target.
+    summary = (summary or "").strip()
+    if summary and len(summary) > target:
+        summary = summary[:target - 1].rstrip() + "…"
+    return summary or None
 
 
 TELEGRAM_BRIDGE = TelegramBridge(
@@ -617,14 +698,41 @@ def api_set_config():
             cfg["telegram_status"] = {**TGS_DEFAULTS, **(cfg.get("telegram_status") or {}), **payload["telegram_status"]}
         if "llm" in payload:
             cfg["llm"] = {**llm.DEFAULTS, **(cfg.get("llm") or {}), **payload["llm"]}
+        if "proxy" in payload:
+            cfg["proxy"] = {**PROXY_DEFAULTS, **(cfg.get("proxy") or {}), **payload["proxy"]}
+        # Resolve the central proxy into each service's own field before save,
+        # so the bridge / LLM / status-bot pick up the per-service toggles.
+        _propagate_proxy(cfg)
         save_config(cfg)
     BRIDGE.configure(cfg.get("mesh", {}) or {})
     _apply_command_settings(cfg)
+    _apply_weather_proxy(cfg)
     # Push the freshest telegram config into the bridge. Reconfigure will
     # restart the worker if it's currently running.
     TELEGRAM_BRIDGE.configure(cfg.get("telegram") or {})
     reschedule_all()
     return jsonify(cfg)
+
+
+@app.route("/api/proxy/test", methods=["POST"])
+def api_proxy_test():
+    """Check the proxy works by fetching our public IP through it. Body may
+    carry {"url": "socks5://..."} to test the value being typed before saving;
+    omit it to test the saved central proxy URL."""
+    payload = request.get_json(force=True, silent=True) or {}
+    url = ((payload.get("url") if "url" in payload
+            else (load_config().get("proxy") or {}).get("url")) or "").strip()
+    proxies = _proxies_dict(url)
+    out: dict[str, Any] = {"url": url, "via_proxy": bool(proxies)}
+    try:
+        r = requests.get("https://api.ipify.org?format=json", timeout=12, proxies=proxies)
+        r.raise_for_status()
+        out["ok"] = True
+        out["ip"] = (r.json() or {}).get("ip")
+    except Exception as exc:
+        out["ok"] = False
+        out["error"] = str(exc)
+    return jsonify(out)
 
 
 @app.route("/api/fields", methods=["GET"])
@@ -1207,17 +1315,20 @@ RAINVIEWER_MAPS_URL = "https://api.rainviewer.com/public/weather-maps.json"
 RAINVIEWER_HOST = "https://tilecache.rainviewer.com"
 
 
-def _outbound_proxies() -> Optional[dict]:
-    """Reuse whatever proxy the user already configured (Telegram bridge, then
-    LLM). Empty → direct connection."""
-    cfg = load_config()
-    proxy = ((cfg.get("telegram") or {}).get("proxy")
-             or (cfg.get("llm") or {}).get("proxy") or "").strip()
+def _proxies_dict(proxy: str) -> Optional[dict]:
+    """requests-style proxies dict from a URL. socks5:// → socks5h:// so DNS
+    resolves through the proxy. Empty → None (direct)."""
+    proxy = (proxy or "").strip()
     if not proxy:
         return None
     if proxy.startswith("socks5://"):
         proxy = proxy.replace("socks5://", "socks5h://", 1)
     return {"http": proxy, "https": proxy}
+
+
+def _outbound_proxies() -> Optional[dict]:
+    """Proxy for RainViewer radar fetches — honours the `use_radar` toggle."""
+    return _proxies_dict(_proxy_for(load_config(), "radar"))
 
 
 @app.route("/api/radar/maps", methods=["GET"])
