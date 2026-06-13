@@ -154,6 +154,13 @@ class MeshBridge:
         self._msg_lock = threading.Lock()
         self._pubsub_subscribed = False
 
+        # Our own "last heard" per node num. The library's in-memory
+        # iface.nodes[*].lastHeard can go stale between reconnects (it only
+        # refreshes the full NodeDB at connect), which makes the online count
+        # under-report. We bump this on every received packet and fold it into
+        # the freshness check so the count stays live without a reconnect.
+        self._last_seen: dict[int, int] = {}
+
         # optional callback: gets the message dict, returns text to send back
         # (used for the !commands feature). Called in a background thread.
         self._command_handler = command_handler
@@ -266,9 +273,20 @@ class MeshBridge:
         except Exception:
             log.exception("Failed to subscribe to meshtastic pubsub")
 
+    def _mark_seen(self, packet) -> None:
+        """Record that we just heard from a node — keeps the online count fresh
+        even if the library's NodeDB lastHeard hasn't been refreshed."""
+        try:
+            num = (packet or {}).get("from")
+            if isinstance(num, int):
+                self._last_seen[num] = int(time.time())
+        except Exception:
+            pass
+
     def _on_any_packet(self, packet=None, interface=None):
         """Dispatch non-text packets we care about (traceroute, ACKs)."""
         try:
+            self._mark_seen(packet)
             decoded = (packet or {}).get("decoded") or {}
             portnum = decoded.get("portnum")
 
@@ -553,6 +571,9 @@ class MeshBridge:
                     info["my_node_num"] = getattr(my_info, "my_node_num", None)
                     info["nodes_known"] = len(nodes)
                     # «Онлайн» — те, чей last_heard был не дальше двух часов назад.
+                    # Берём максимум из NodeDB lastHeard и нашего _last_seen
+                    # (обновляется на каждый принятый пакет), чтобы счётчик не
+                    # занижался из-за протухшего NodeDB между реконнектами.
                     now = int(time.time())
                     online = 0
                     for n in nodes.values():
@@ -562,7 +583,9 @@ class MeshBridge:
                             lh = int(n.get("lastHeard") or 0)
                         except (TypeError, ValueError):
                             lh = 0
-                        if lh and (now - lh) < 7200:
+                        seen = self._last_seen.get(n.get("num"), 0)
+                        fresh = max(lh, seen)
+                        if fresh and (now - fresh) < 7200:
                             online += 1
                     info["nodes_online_2h"] = online
                     # Legacy key kept for backward compat with older UIs.
@@ -1064,6 +1087,8 @@ class MeshBridge:
                     user = n.get("user") or {}
                     position = n.get("position") or {}
                     metrics = n.get("deviceMetrics") or {}
+                    lh = int(n.get("lastHeard") or 0)
+                    lh = max(lh, self._last_seen.get(n.get("num"), 0))
                     out.append({
                         "node_id": user.get("id") or str(k),
                         "num": n.get("num"),
@@ -1071,7 +1096,7 @@ class MeshBridge:
                         "long_name": user.get("longName") or "",
                         "hw_model": user.get("hwModel") or "",
                         "role": user.get("role") or "",
-                        "last_heard": int(n.get("lastHeard") or 0) or None,
+                        "last_heard": lh or None,
                         "snr": n.get("snr"),
                         "latitude": position.get("latitude"),
                         "longitude": position.get("longitude"),
