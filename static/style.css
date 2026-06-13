@@ -140,6 +140,34 @@ html[data-theme="light"] .brand .brand-text {
   -webkit-background-clip: text;
   background-clip: text;
 }
+/* Hard-coded white text → dark for light theme. The .good/.bad/.ok stat
+   variants keep their semantic colour (excluded via :not()). */
+html[data-theme="light"] .card h2,
+html[data-theme="light"] .hm-val,
+html[data-theme="light"] .ww-temp,
+html[data-theme="light"] .ww-cond-text,
+html[data-theme="light"] .stat-value:not(.good):not(.bad):not(.ok) {
+  color: var(--text);
+}
+html[data-theme="light"] .stat-value,
+html[data-theme="light"] .ww-temp { text-shadow: none; }
+/* More on-surface white text → dark (white is kept where it sits on an accent
+   or dark background: buttons, outgoing chat bubbles, avatars, map markers). */
+html[data-theme="light"] .nodes-list .node-name,
+html[data-theme="light"] .ww-item strong,
+html[data-theme="light"] .chat-title,
+html[data-theme="light"] .trace-head,
+html[data-theme="light"] .trace-name,
+html[data-theme="light"] .trace-stat strong,
+html[data-theme="light"] .tg-mode-option strong,
+html[data-theme="light"] .tg-match-channel,
+html[data-theme="light"] .tg-seen-channel,
+html[data-theme="light"] .llm-ask-result .llm-answer {
+  color: var(--text);
+}
+html[data-theme="light"] .tab-btn.active { color: var(--accent-2); }
+/* Keep the toast dark in light theme (conventional) so its white text reads. */
+html[data-theme="light"] .toast { background: rgba(26, 35, 52, 0.94); }
 
 /* ---------- App shell (topbar fixed · sidebar · scrolling main) ---------- */
 .app-shell {
