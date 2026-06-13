@@ -7,6 +7,16 @@
   <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
   <link rel="mask-icon" href="/static/favicon.svg" color="#8b9eff">
   <meta name="theme-color" content="#0a0e1a">
+  <script>
+    // Apply saved/preferred theme before first paint to avoid a flash.
+    (function () {
+      try {
+        var t = localStorage.getItem("theme");
+        if (!t) t = matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
+        if (t === "light") document.documentElement.setAttribute("data-theme", "light");
+      } catch (e) {}
+    })();
+  </script>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap">
@@ -36,7 +46,10 @@
       </svg>
       <span class="brand-text">Weather → Mesh</span>
     </div>
-    <div class="status" id="meshStatus">…</div>
+    <div class="topbar-right">
+      <button id="themeToggle" class="theme-toggle" type="button" title="Светлая / тёмная тема" aria-label="Переключить тему">🌙</button>
+      <div class="status" id="meshStatus">…</div>
+    </div>
   </header>
 
   <div class="app-body">
@@ -120,6 +133,40 @@
             <div class="stat-label">Средние прыжки</div>
             <div class="stat-value" id="statHops">—</div>
             <div class="stat-sub">сколько hops в среднем</div>
+          </div>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>📡 Загрузка эфира (LoRa)</h2>
+        <p class="hint" id="airtimeHint">
+          Сколько эфира занято в твоём канале. Выше ~25% — пакеты начинают
+          теряться и растут задержки; бот сам притормаживает рассылки.
+        </p>
+        <div class="airtime-gauge">
+          <div class="ag-head">
+            <span class="ag-label">Занятость канала</span>
+            <span class="ag-value" id="airChanVal">—</span>
+          </div>
+          <div class="ag-track"><div class="ag-fill" id="airChanFill"></div></div>
+        </div>
+        <div class="airtime-gauge">
+          <div class="ag-head">
+            <span class="ag-label">Наша передача (air-util TX)</span>
+            <span class="ag-value" id="airTxVal">—</span>
+          </div>
+          <div class="ag-track"><div class="ag-fill" id="airTxFill"></div></div>
+        </div>
+        <div class="stats-grid" style="margin-top: 14px;">
+          <div class="stat">
+            <div class="stat-label">Пакетов ↑ за час</div>
+            <div class="stat-value" id="airSent1h">—</div>
+            <div class="stat-sub" id="airSent24h">— за сутки</div>
+          </div>
+          <div class="stat">
+            <div class="stat-label">Пакетов ↓ за час</div>
+            <div class="stat-value" id="airRecv1h">—</div>
+            <div class="stat-sub" id="airRecv24h">— за сутки</div>
           </div>
         </div>
       </section>
@@ -417,6 +464,54 @@
         <p class="hint">
           Фичи в разработке. Включай только то, что понимаешь — оно может ломаться, есть лишние зависимости и т.п.
         </p>
+
+        <!-- ===== Rain nowcast ===== -->
+        <details class="experiment" id="experimentNowcast">
+          <summary>
+            <label class="toggle-row" onclick="event.stopPropagation();">
+              <input type="checkbox" id="ncEnabled">
+              <span><strong>Радар-нокаст «дождь идёт к тебе»</strong> — заранее предупреждает в mesh о приближающихся осадках</span>
+            </label>
+          </summary>
+          <div class="experiment-body">
+            <p class="hint">
+              Берёт поминутный прогноз осадков Open-Meteo для твоих координат и, если дождь/снег
+              приближается в ближайший час, шлёт короткое сообщение: <code>🌧 Дождь через ~15 мин (умеренный), продлится ~40 мин</code>.
+              Один и тот же подход анонсируется один раз (тихий интервал). Координаты берутся из «Настроек».
+            </p>
+
+            <div class="tg-status" id="ncStatus">
+              <span class="tg-dot tg-dot-idle"></span>
+              <span id="ncStatusText">Загружаю состояние…</span>
+            </div>
+
+            <div class="grid2">
+              <label>Проверять каждые <small>(мин)</small>
+                <input type="number" id="ncInterval" min="2" max="60" step="1" value="10">
+              </label>
+              <label>Смотреть вперёд <small>(мин)</small>
+                <input type="number" id="ncLookahead" min="15" max="180" step="15" value="60">
+              </label>
+              <label>Порог осадков <small>(мм за 15 мин)</small>
+                <input type="number" id="ncMinMm" min="0.1" max="5" step="0.1" value="0.3">
+              </label>
+              <label>Не повторять <small>(мин)</small>
+                <input type="number" id="ncQuiet" min="0" max="240" step="10" value="60">
+              </label>
+            </div>
+            <label class="toggle-row">
+              <input type="checkbox" id="ncAlertOngoing" checked>
+              <span>Предупреждать, если дождь <strong>уже идёт</strong> (и сколько ещё продлится)</span>
+            </label>
+
+            <div class="row">
+              <button id="ncSave">💾 Сохранить</button>
+              <button id="ncTest" class="ghost">🌧 Проверить сейчас</button>
+              <button id="ncRefresh" class="ghost">↻ Обновить</button>
+            </div>
+            <div id="ncTestResult" class="tg-test-result" hidden></div>
+          </div>
+        </details>
 
         <!-- ===== LLM / AI assistant ===== -->
         <details class="experiment" id="experimentLlm">

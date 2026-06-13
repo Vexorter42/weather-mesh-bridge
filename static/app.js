@@ -103,23 +103,46 @@ $$(".tab-btn").forEach(btn => {
       refreshUpdateInfo();
       refreshTgStatusBot();
       refreshLlmStatus();
+      refreshNowcastStatus();
     } else if (CURRENT_TAB === "proxy") {
       loadProxyConfig();
     }
   });
 });
 
+// ---------- Theme (light / dark) ----------
+function currentTheme() {
+  return document.documentElement.getAttribute("data-theme") === "light" ? "light" : "dark";
+}
+function applyTheme(theme) {
+  if (theme === "light") document.documentElement.setAttribute("data-theme", "light");
+  else document.documentElement.removeAttribute("data-theme");
+  const btn = $("#themeToggle");
+  if (btn) btn.textContent = theme === "light" ? "☀️" : "🌙";
+  const meta = document.querySelector('meta[name="theme-color"]');
+  if (meta) meta.setAttribute("content", theme === "light" ? "#e9edf6" : "#0a0e1a");
+}
+(function initTheme() {
+  applyTheme(currentTheme());
+  $("#themeToggle")?.addEventListener("click", () => {
+    const next = currentTheme() === "light" ? "dark" : "light";
+    try { localStorage.setItem("theme", next); } catch (e) {}
+    applyTheme(next);
+  });
+})();
+
 // ---------- Dashboard ----------
 let KNOWN_NODES = [];     // last fetched node list (for DM picker)
 
 async function refreshDashboard() {
   try {
-    const [stats, nodes, channels, wxCur, wxHourly] = await Promise.all([
+    const [stats, nodes, channels, wxCur, wxHourly, airtime] = await Promise.all([
       api("/api/stats"),
       api("/api/nodes").catch(() => []),
       api("/api/channels").catch(() => []),
       api("/api/weather/current").catch(() => null),
       api("/api/weather/hourly").catch(() => null),
+      api("/api/airtime").catch(() => null),
     ]);
     KNOWN_NODES = Array.isArray(nodes) ? nodes : [];
     KNOWN_CHANNELS = Array.isArray(channels) ? channels : [];
@@ -130,9 +153,47 @@ async function refreshDashboard() {
     rebuildConversations();
     renderConvList();
     renderDashboard(stats, KNOWN_NODES);
+    renderAirtime(airtime);
     renderWeatherWidget(wxCur);
     renderHourlyChart(wxHourly);
   } catch (e) { /* silent — dashboard isn't critical */ }
+}
+
+function renderAirtime(a) {
+  if (!a) return;
+  const gauge = (valEl, fillEl, pct) => {
+    const v = $(valEl), f = $(fillEl);
+    if (pct == null || isNaN(pct)) {
+      if (v) v.textContent = "—";
+      if (f) { f.style.width = "0%"; f.className = "ag-fill"; }
+      return;
+    }
+    const p = Math.max(0, Math.min(100, Number(pct)));
+    if (v) v.textContent = `${p.toFixed(p < 10 ? 1 : 0)}%`;
+    if (f) {
+      f.style.width = `${p}%`;
+      f.className = "ag-fill" + (p >= 50 ? " danger" : p >= 25 ? " warn" : "");
+    }
+  };
+  gauge("#airChanVal", "#airChanFill", a.channel_utilization);
+  gauge("#airTxVal", "#airTxFill", a.air_util_tx);
+  $("#airSent1h").textContent = a.sent_1h ?? "—";
+  $("#airRecv1h").textContent = a.received_1h ?? "—";
+  $("#airSent24h").textContent = `${a.sent_24h ?? 0} за сутки`;
+  $("#airRecv24h").textContent = `${a.received_24h ?? 0} за сутки`;
+
+  // Warn banner when the channel is congested.
+  const hint = $("#airtimeHint");
+  if (hint) {
+    const cu = a.channel_utilization;
+    if (cu != null && cu >= 50) {
+      hint.innerHTML = "🔴 <strong>Эфир перегружен</strong> — пакеты теряются. Сократи рассылки/частоту или подними интервалы.";
+    } else if (cu != null && cu >= 25) {
+      hint.innerHTML = "🟡 <strong>Эфир нагружен</strong> — близко к порогу. Бот уже придерживает ответы; не лей лишнего.";
+    } else {
+      hint.innerHTML = "Сколько эфира занято в твоём канале. Выше ~25% — пакеты начинают теряться и растут задержки; бот сам притормаживает рассылки.";
+    }
+  }
 }
 
 function renderDashboard(s, nodes) {
@@ -2587,6 +2648,86 @@ async function init() {
   wireTgStatusBotPanel();
   wireLlmPanel();
   wireProxyPanel();
+  wireNowcastPanel();
+}
+
+// ---------- Радар-нокаст («дождь идёт к тебе») ----------
+
+function wireNowcastPanel() {
+  $("#ncEnabled")?.addEventListener("change", async () => {
+    await saveNowcastConfig();
+    refreshNowcastStatus();
+  });
+  $("#ncSave")?.addEventListener("click", async () => {
+    await saveNowcastConfig(); toast("Сохранено", "ok"); refreshNowcastStatus();
+  });
+  $("#ncRefresh")?.addEventListener("click", refreshNowcastStatus);
+  $("#ncTest")?.addEventListener("click", testNowcast);
+}
+
+async function saveNowcastConfig() {
+  const nowcast = {
+    enabled:                $("#ncEnabled").checked,
+    check_interval_minutes: Math.max(2, parseInt($("#ncInterval").value, 10) || 10),
+    lookahead_minutes:      Math.max(15, parseInt($("#ncLookahead").value, 10) || 60),
+    min_intensity_mm:       Math.max(0.1, parseFloat($("#ncMinMm").value) || 0.3),
+    quiet_minutes:          Math.max(0, parseInt($("#ncQuiet").value, 10) || 60),
+    alert_ongoing:          $("#ncAlertOngoing").checked,
+  };
+  try {
+    await api("/api/config", { method: "POST", body: { nowcast } });
+  } catch (e) { toast(e.message, "err"); }
+}
+
+async function refreshNowcastStatus() {
+  let s;
+  try { s = await api("/api/nowcast/status"); }
+  catch (e) { setNcStatus("err", "Ошибка: " + e.message); return; }
+  const c = s.config || {};
+  const st = s.state || {};
+
+  if (c.enabled) {
+    const last = st.last_check_ts ? new Date(st.last_check_ts * 1000).toLocaleTimeString() : "—";
+    setNcStatus("ok", `Включён · последняя проверка ${last}`);
+  } else {
+    setNcStatus("idle", "Выключен");
+  }
+  // Reflect config into fields only when untouched defaults.
+  if ($("#ncEnabled")) $("#ncEnabled").checked = !!c.enabled;
+  if (c.check_interval_minutes != null && $("#ncInterval").value === "10") $("#ncInterval").value = c.check_interval_minutes;
+  if (c.lookahead_minutes != null && $("#ncLookahead").value === "60") $("#ncLookahead").value = c.lookahead_minutes;
+  if (c.min_intensity_mm != null && $("#ncMinMm").value === "0.3") $("#ncMinMm").value = c.min_intensity_mm;
+  if (c.quiet_minutes != null && $("#ncQuiet").value === "60") $("#ncQuiet").value = c.quiet_minutes;
+  if (typeof c.alert_ongoing === "boolean") $("#ncAlertOngoing").checked = c.alert_ongoing;
+}
+
+async function testNowcast() {
+  const out = $("#ncTestResult");
+  out.hidden = false;
+  out.className = "tg-test-result";
+  out.innerHTML = `<span class="muted">⏳ Запрашиваю поминутный прогноз…</span>`;
+  try {
+    await saveNowcastConfig();
+    const r = await api("/api/nowcast/check", { method: "POST" });
+    if (r.sent && r.sent.text) {
+      out.className = "tg-test-result ok";
+      out.innerHTML = `✅ <strong>Отправлено в mesh:</strong><div class="muted" style="margin-top:4px">${escapeHtml(r.sent.text)}</div>`;
+    } else {
+      out.className = "tg-test-result";
+      out.innerHTML = `<span class="muted">☀️ Осадков в ближайший час не ожидается — ничего не отправлено.</span>`;
+    }
+  } catch (e) {
+    out.className = "tg-test-result err";
+    out.innerHTML = `❌ ${escapeHtml(e.message)}`;
+  }
+  refreshNowcastStatus();
+}
+
+function setNcStatus(kind, text) {
+  const dot = $("#ncStatus .tg-dot");
+  const txt = $("#ncStatusText");
+  if (dot) dot.className = `tg-dot tg-dot-${kind}`;
+  if (txt) txt.textContent = text;
 }
 
 // ---------- Прокси (общий, с тумблерами по сервисам) ----------
@@ -2756,6 +2897,16 @@ async function askLlm() {
 
 function wireTgStatusBotPanel() {
   $("#tgsSave")?.addEventListener("click", saveTgStatusConfig);
+  $("#tgsEnabled")?.addEventListener("change", async (e) => {
+    if (e.target.checked) await saveTgStatusConfig();
+    const ep = e.target.checked ? "/api/tg-status/start" : "/api/tg-status/stop";
+    try {
+      const r = await api(ep, { method: "POST" });
+      if (r && r.ok === false && r.error) toast(r.error, "err");
+      else toast(e.target.checked ? "Запущен" : "Остановлен", "ok");
+    } catch (err) { toast(err.message, "err"); }
+    refreshTgStatusBot();
+  });
   $("#tgsStart")?.addEventListener("click", async () => {
     await saveTgStatusConfig();
     try {
@@ -2827,6 +2978,9 @@ async function refreshTgStatusBot() {
   } else {
     setTgsStatus("idle", c.bot_token_set && c.chat_id ? "Готов запуститься" : "Заполни bot_token и chat_id");
   }
+
+  // Reflect the enable toggle from real state (running > persisted enabled)
+  if ($("#tgsEnabled")) $("#tgsEnabled").checked = !!(s.running || c.enabled);
 
   // Reflect config (only when fields are empty — don't stomp user typing)
   if (!$("#tgsToken").value && c.bot_token_set) $("#tgsToken").placeholder = "(сохранено)";

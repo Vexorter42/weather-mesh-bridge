@@ -27,6 +27,7 @@ commands.BOT_START_TS = time.time()
 
 import weather
 import weather_alerts
+import rain_nowcast
 from chat_db import ChatDb
 from meshbridge import MeshBridge
 import llm
@@ -187,6 +188,7 @@ def load_config() -> dict[str, Any]:
             "message": {"language": "ru", "include_header": True, "use_emojis": False},
             "commands": {"enabled": True, "reply_delay_min_s": 5, "reply_delay_max_s": 10},
             "alerts": dict(weather_alerts.DEFAULTS),
+            "nowcast": dict(rain_nowcast.DEFAULTS),
             "schedules": [],
             "telegram": dict(TG_DEFAULTS),
             "telegram_status": dict(TGS_DEFAULTS),
@@ -261,6 +263,10 @@ _apply_weather_proxy(CONFIG)
 # Persistent state for weather-alerts dedup, plus background worker.
 ALERTS_STATE = weather_alerts.AlertsState(BASE_DIR / "alerts_state.json")
 weather_alerts.start_background_worker(load_config, BRIDGE, ALERTS_STATE)
+
+# Rain nowcast — "дождь идёт к тебе" via Open-Meteo minutely_15.
+NOWCAST_STATE = rain_nowcast.NowcastState(BASE_DIR / "nowcast_state.json")
+rain_nowcast.start_background_worker(load_config, BRIDGE, NOWCAST_STATE)
 
 
 def _telegram_forward(text: str, channel_index: int, destination: str) -> None:
@@ -692,6 +698,8 @@ def api_set_config():
             cfg["commands"] = {**cfg.get("commands", {}), **payload["commands"]}
         if "alerts" in payload:
             cfg["alerts"] = {**weather_alerts.DEFAULTS, **(cfg.get("alerts") or {}), **payload["alerts"]}
+        if "nowcast" in payload:
+            cfg["nowcast"] = {**rain_nowcast.DEFAULTS, **(cfg.get("nowcast") or {}), **payload["nowcast"]}
         if "telegram" in payload:
             cfg["telegram"] = {**TG_DEFAULTS, **(cfg.get("telegram") or {}), **payload["telegram"]}
         if "telegram_status" in payload:
@@ -1288,6 +1296,25 @@ def api_alerts_check():
     return jsonify({"sent": sent, "count": len(sent)})
 
 
+@app.route("/api/nowcast/status", methods=["GET"])
+def api_nowcast_status():
+    """Nowcast config snapshot + last-run state for the UI."""
+    nc = {**rain_nowcast.DEFAULTS, **(load_config().get("nowcast") or {})}
+    return jsonify({"config": nc, "state": NOWCAST_STATE.status()})
+
+
+@app.route("/api/nowcast/check", methods=["POST"])
+def api_nowcast_check():
+    """Force one nowcast cycle right now — for manual testing."""
+    cfg = load_config()
+    try:
+        sent = rain_nowcast.check(cfg, BRIDGE, NOWCAST_STATE)
+    except Exception as exc:
+        log.exception("Manual nowcast check failed")
+        return jsonify({"error": str(exc)}), 500
+    return jsonify({"sent": sent, "ok": True})
+
+
 @app.route("/api/stats", methods=["GET"])
 def api_stats():
     """Aggregate counters for the main-page dashboard."""
@@ -1296,6 +1323,29 @@ def api_stats():
     s["mesh_connected"] = bool(mesh.get("connected"))
     s["mesh_nodes_known"] = mesh.get("nodes_known")
     return jsonify(s)
+
+
+@app.route("/api/airtime", methods=["GET"])
+def api_airtime():
+    """LoRa channel-load monitor: the local node's own channel utilization and
+    air-util-TX (from its telemetry) + our outgoing/incoming packet counts."""
+    mesh = BRIDGE.status()
+    my_num = mesh.get("my_node_num")
+    chan_util = air_tx = None
+    if my_num is not None:
+        for n in BRIDGE.get_known_nodes():
+            if n.get("num") == my_num:
+                chan_util = n.get("channel_utilization")
+                air_tx = n.get("air_util_tx")
+                break
+    out = {
+        "connected": bool(mesh.get("connected")),
+        "channel_utilization": chan_util,   # % of airtime the channel is busy
+        "air_util_tx": air_tx,              # % of time our node is transmitting
+        "nodes_online_2h": mesh.get("nodes_online_2h"),
+    }
+    out.update(CHAT_DB.airtime_counts())
+    return jsonify(out)
 
 
 @app.route("/api/health", methods=["GET"])

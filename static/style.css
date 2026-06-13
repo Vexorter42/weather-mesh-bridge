@@ -51,12 +51,49 @@
   --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
 }
 
+/* ---------- Light theme (toggled via <html data-theme="light">) ---------- */
+:root[data-theme="light"] {
+  color-scheme: light;
+
+  --glass-bg: rgba(255, 255, 255, 0.66);
+  --glass-bg-strong: rgba(255, 255, 255, 0.84);
+  --glass-bg-soft: rgba(255, 255, 255, 0.44);
+  --glass-border: rgba(28, 40, 78, 0.10);
+  --glass-border-strong: rgba(28, 40, 78, 0.20);
+  --glass-highlight: rgba(255, 255, 255, 0.6);
+
+  --text: #1a2334;
+  --text-soft: #3a4456;
+  --muted: #5d6680;
+  --muted-soft: #97a0b5;
+
+  --accent: #4d63d8;
+  --accent-2: #3a52d0;
+  --accent-3: #2b3fb5;
+  --accent-glow: rgba(77, 99, 216, 0.20);
+
+  --magenta: #b455e6;
+  --teal: #1597a8;
+  --good: #1ca85a;
+  --good-glow: rgba(28, 168, 90, 0.16);
+  --warn: #c5870a;
+  --warn-glow: rgba(197, 135, 10, 0.16);
+  --danger: #e0455a;
+  --danger-glow: rgba(224, 69, 90, 0.14);
+
+  --shadow-sm: 0 2px 8px rgba(28, 40, 78, 0.10);
+  --shadow-md: 0 8px 28px rgba(28, 40, 78, 0.14);
+  --shadow-lg: 0 24px 60px rgba(28, 40, 78, 0.20);
+  --shadow-glow: 0 0 0 1px var(--glass-border), 0 8px 32px rgba(28, 40, 78, 0.12);
+}
+
 * { box-sizing: border-box; }
 html, body { min-height: 100%; }
 
 /* Solid dark base on html only — body must stay transparent so the
    ::before backdrop layer with z-index: -1 is visible through it. */
 html { background: #050812; }
+html[data-theme="light"] { background: #e9edf6; }
 
 body {
   margin: 0;
@@ -83,6 +120,25 @@ body::before {
     radial-gradient(1300px 950px at 95% 12%,  rgba(215, 123, 255, 0.24), transparent 70%),
     radial-gradient(1400px 1000px at 50% 95%, rgba(77, 208, 225, 0.20), transparent 70%),
     radial-gradient(1500px 1100px at 30% 60%, rgba(94, 235, 142, 0.10), transparent 70%);
+}
+/* Softer, brighter backdrop blooms for the light theme. */
+html[data-theme="light"] body::before {
+  background:
+    radial-gradient(1200px 900px at 10% 5%,   rgba(106, 130, 255, 0.20), transparent 70%),
+    radial-gradient(1300px 950px at 95% 12%,  rgba(215, 123, 255, 0.16), transparent 70%),
+    radial-gradient(1400px 1000px at 50% 95%, rgba(77, 208, 225, 0.16), transparent 70%),
+    radial-gradient(1500px 1100px at 30% 60%, rgba(94, 235, 142, 0.10), transparent 70%);
+}
+/* Hard-coded dark chrome → light equivalents. */
+html[data-theme="light"] .topbar { background: rgba(255, 255, 255, 0.62); }
+html[data-theme="light"] .sidebar { background: rgba(255, 255, 255, 0.42); }
+@media (max-width: 860px) {
+  html[data-theme="light"] .sidebar { background: rgba(255, 255, 255, 0.88); }
+}
+html[data-theme="light"] .brand .brand-text {
+  background: linear-gradient(120deg, #2b3fb5 0%, #6a82ff 35%, #b455e6 70%, #1597a8 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
 }
 
 /* ---------- App shell (topbar fixed · sidebar · scrolling main) ---------- */
@@ -125,6 +181,62 @@ body::before {
   text-shadow: 0 2px 22px rgba(139, 158, 255, 0.25);
   white-space: nowrap;
 }
+
+.topbar-right {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+.theme-toggle {
+  flex: 0 0 auto;
+  width: 38px;
+  height: 38px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.15rem;
+  line-height: 1;
+  border-radius: 50%;
+  border: 1px solid var(--glass-border);
+  background: var(--glass-bg-soft);
+  color: var(--text);
+  cursor: pointer;
+  transition: background var(--transition), transform var(--transition), border-color var(--transition);
+}
+.theme-toggle:hover {
+  background: var(--glass-bg);
+  border-color: var(--glass-border-strong);
+  transform: rotate(-12deg) scale(1.05);
+}
+
+/* ---------- Airtime gauge (LoRa channel load) ---------- */
+.airtime-gauge { margin: 12px 0; }
+.ag-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 6px;
+}
+.ag-label { color: var(--text-soft); font-size: 0.9rem; }
+.ag-value { font-weight: 700; font-variant-numeric: tabular-nums; }
+.ag-track {
+  height: 10px;
+  border-radius: 999px;
+  background: var(--glass-bg-soft);
+  border: 1px solid var(--glass-border);
+  overflow: hidden;
+}
+.ag-fill {
+  height: 100%;
+  width: 0%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--good), var(--teal));
+  transition: width var(--transition), background var(--transition);
+}
+.ag-fill.warn { background: linear-gradient(90deg, var(--good), var(--warn)); }
+.ag-fill.danger { background: linear-gradient(90deg, var(--warn), var(--danger)); }
 
 .app-body {
   flex: 1;

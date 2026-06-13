@@ -315,6 +315,26 @@ class ChatDb:
                 "total_messages": int(total),
             }
 
+    def airtime_counts(self) -> dict[str, int]:
+        """Outgoing / incoming packet counts over the last hour and 24h —
+        for the airtime monitor. Reactions count too (they go on air)."""
+        with self._lock:
+            c = self._connect()
+            now = int(time.time())
+            hour_ago = now - 3600
+            day_ago = now - 86400
+
+            def _n(sql: str, *args) -> int:
+                row = c.execute(sql, args).fetchone()
+                return int(row[0]) if row and row[0] is not None else 0
+
+            return {
+                "sent_1h":      _n("SELECT COUNT(*) FROM messages WHERE incoming=0 AND time>=?", hour_ago),
+                "received_1h":  _n("SELECT COUNT(*) FROM messages WHERE incoming=1 AND time>=?", hour_ago),
+                "sent_24h":     _n("SELECT COUNT(*) FROM messages WHERE incoming=0 AND time>=?", day_ago),
+                "received_24h": _n("SELECT COUNT(*) FROM messages WHERE incoming=1 AND time>=?", day_ago),
+            }
+
     # ------------------------------------------------------------------
     # Housekeeping
     # ------------------------------------------------------------------

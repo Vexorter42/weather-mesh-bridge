@@ -215,6 +215,24 @@ def fetch_weather(latitude: float, longitude: float, timezone: str = "auto") -> 
     return r.json()
 
 
+@_ttl_cache(300)            # 5 min — nowcast refreshes often
+def fetch_minutely(latitude: float, longitude: float, timezone: str = "auto") -> dict[str, Any]:
+    """15-minutely precipitation nowcast for the next hours (Open-Meteo).
+
+    Returns the raw payload; the caller reads `minutely_15.time` /
+    `minutely_15.precipitation` and `utc_offset_seconds` to locate "now"."""
+    params = {
+        "latitude": latitude,
+        "longitude": longitude,
+        "timezone": timezone or "auto",
+        "minutely_15": "precipitation,weather_code",
+        "forecast_days": 1,
+    }
+    r = _rget(FORECAST_URL, params=params, timeout=15)
+    r.raise_for_status()
+    return r.json()
+
+
 @_ttl_cache(1800)           # 30 min — water temp barely moves
 def fetch_water_temperature(
     latitude: float, longitude: float, timezone: str = "auto"
