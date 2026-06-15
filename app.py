@@ -29,6 +29,7 @@ import weather
 import weather_alerts
 import rain_nowcast
 from chat_db import ChatDb
+from history_db import HistoryDb
 from meshbridge import MeshBridge
 import llm
 from telegram_bridge import DEFAULTS as TG_DEFAULTS, TELETHON_AVAILABLE, TelegramBridge
@@ -221,6 +222,9 @@ _mesh_cfg = CONFIG.get("mesh", {}) or {}
 # Persistent chat store — SQLite DB next to config.json.
 CHAT_DB = ChatDb(BASE_DIR / "chat.db")
 
+# Mesh-node history (telemetry time-series + traceroute log) — separate DB.
+HISTORY_DB = HistoryDb(BASE_DIR / "history.db")
+
 BRIDGE = MeshBridge(
     connection_type=_mesh_cfg.get("connection_type", "serial"),
     device_path=_mesh_cfg.get("device_path", "auto"),
@@ -267,6 +271,29 @@ weather_alerts.start_background_worker(load_config, BRIDGE, ALERTS_STATE)
 # Rain nowcast — "дождь идёт к тебе" via Open-Meteo minutely_15.
 NOWCAST_STATE = rain_nowcast.NowcastState(BASE_DIR / "nowcast_state.json")
 rain_nowcast.start_background_worker(load_config, BRIDGE, NOWCAST_STATE)
+
+
+def _start_telemetry_collector(interval_seconds: int = 600) -> threading.Thread:
+    """Snapshot node telemetry into history.db every few minutes so even quiet
+    nodes accumulate a time series for the charts; prune old rows each cycle."""
+    def loop():
+        time.sleep(120)   # let the interface populate its NodeDB first
+        while True:
+            try:
+                n = HISTORY_DB.add_telemetry_snapshot(BRIDGE.get_known_nodes())
+                HISTORY_DB.prune()
+                if n:
+                    log.debug("Telemetry snapshot: %d nodes recorded", n)
+            except Exception:
+                log.exception("Telemetry collector crashed (will retry)")
+            time.sleep(interval_seconds)
+
+    t = threading.Thread(target=loop, daemon=True, name="telemetry-collector")
+    t.start()
+    return t
+
+
+_start_telemetry_collector()
 
 
 def _telegram_forward(text: str, channel_index: int, destination: str) -> None:
@@ -1061,6 +1088,16 @@ def api_nodes():
     return jsonify(BRIDGE.get_known_nodes())
 
 
+@app.route("/api/nodes/<int:num>/telemetry", methods=["GET"])
+def api_node_telemetry(num: int):
+    """Telemetry time-series for one node (battery/voltage/util/SNR over time)."""
+    try:
+        hours = max(1, min(168, int(request.args.get("hours", 24))))
+    except (TypeError, ValueError):
+        hours = 24
+    return jsonify(HISTORY_DB.telemetry(num, since_seconds=hours * 3600))
+
+
 @app.route("/api/channels", methods=["GET"])
 def api_channels():
     """List channels configured on the connected Heltec — for chat sidebar."""
@@ -1094,7 +1131,25 @@ def api_mesh_traceroute():
     except Exception as exc:
         log.exception("Traceroute crashed")
         return jsonify({"error": str(exc)}), 500
+    # Log the attempt so the user can see how the route to this node changes.
+    try:
+        HISTORY_DB.add_traceroute({
+            "dest_id": dest,
+            "dest_name": result.get("from_name") or "",
+            "ok": not result.get("error"),
+            "route": [h.get("node_id") for h in (result.get("hops_forward") or [])],
+            "route_back": [h.get("node_id") for h in (result.get("hops_back") or [])],
+        })
+    except Exception:
+        log.exception("Failed to log traceroute history")
     return jsonify(result)
+
+
+@app.route("/api/mesh/traceroute/history", methods=["GET"])
+def api_traceroute_history():
+    """Past traceroutes (optionally to one node) — to spot route changes."""
+    dest = (request.args.get("dest") or "").strip() or None
+    return jsonify(HISTORY_DB.traceroute_history(dest, limit=30))
 
 
 @app.route("/api/heltec/info", methods=["GET"])
@@ -1430,6 +1485,10 @@ def api_llm_status():
         "temperature": c.get("temperature", llm.DEFAULTS["temperature"]),
         "proxy": c.get("proxy") or "",
         "max_reply_chars": c.get("max_reply_chars") or llm.DEFAULTS["max_reply_chars"],
+        "fallback_models": (", ".join(c["fallback_models"])
+                            if isinstance(c.get("fallback_models"), list)
+                            else (c.get("fallback_models") or "")),
+        "context_memory": c.get("context_memory", True),
     })
 
 

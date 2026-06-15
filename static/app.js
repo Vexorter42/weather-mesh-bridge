@@ -577,8 +577,19 @@ function openNodeProfile(nodeId) {
     }
   }
 
+  if (n.num != null) {
+    parts.push(`<div class="profile-section">История телеметрии (24ч)</div>`);
+    parts.push(`<div id="profileCharts" class="node-charts muted">Загружаю график…</div>`);
+  }
+  if (nodeId) {
+    parts.push(`<div class="profile-section">История маршрутов</div>`);
+    parts.push(`<div id="profileTraceHist" class="trace-hist muted">Загружаю…</div>`);
+  }
+
   $("#profileBody").innerHTML = parts.join("");
   $("#nodeProfile").hidden = false;
+  if (n.num != null) loadNodeCharts(n.num);
+  if (nodeId) loadTraceHistory(nodeId);
   // Reset traceroute panel between opens
   const tr = $("#tracerouteResult");
   if (tr) { tr.hidden = true; tr.innerHTML = ""; }
@@ -641,6 +652,91 @@ function closeNodeProfile() {
   $("#nodeProfile").hidden = true;
 }
 
+// ---- Node telemetry sparklines (history from history.db) ----
+function _spark(values, color) {
+  const W = 260, H = 38, pad = 3;
+  const nums = values.filter(v => v != null).map(Number);
+  if (nums.length < 2) return "";
+  const min = Math.min(...nums), max = Math.max(...nums);
+  const span = (max - min) || 1;
+  const n = values.length;
+  let d = "", started = false;
+  values.forEach((v, i) => {
+    if (v == null) { started = false; return; }
+    const x = pad + (W - 2 * pad) * (n === 1 ? 0 : i / (n - 1));
+    const y = pad + (H - 2 * pad) * (1 - (Number(v) - min) / span);
+    d += (started ? "L" : "M") + x.toFixed(1) + " " + y.toFixed(1) + " ";
+    started = true;
+  });
+  return `<svg class="nc-spark" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">`
+       + `<path d="${d}" fill="none" stroke="${color}" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+}
+function _fmtNum(v) {
+  if (v == null) return "—";
+  return Number.isInteger(Number(v)) ? String(v) : Number(v).toFixed(1);
+}
+async function loadNodeCharts(num) {
+  const box = $("#profileCharts");
+  if (!box) return;
+  let data;
+  try { data = await api(`/api/nodes/${num}/telemetry?hours=24`); }
+  catch { box.className = "node-charts"; box.innerHTML = `<span class="muted">Не удалось загрузить историю.</span>`; return; }
+  if (!Array.isArray(data) || data.length < 2) {
+    box.className = "node-charts";
+    box.innerHTML = `<span class="muted">Пока мало данных — снимки делаются раз в 10 мин, график появится позже.</span>`;
+    return;
+  }
+  const series = [
+    { key: "battery",   label: "Батарея",        unit: "%",  color: "var(--good)" },
+    { key: "voltage",   label: "Напряжение",     unit: " В", color: "var(--accent)" },
+    { key: "chan_util", label: "Загрузка канала", unit: "%",  color: "var(--warn)" },
+    { key: "snr",       label: "SNR",            unit: "",   color: "var(--teal)" },
+  ];
+  let html = "";
+  for (const s of series) {
+    const vals = data.map(d => d[s.key]);
+    if (vals.filter(v => v != null).length < 2) continue;
+    const last = [...vals].reverse().find(v => v != null);
+    html += `<div class="nc-row"><div class="nc-head"><span>${s.label}</span>`
+          + `<span class="nc-last">${_fmtNum(last)}${s.unit}</span></div>${_spark(vals, s.color)}</div>`;
+  }
+  box.className = "node-charts";
+  box.innerHTML = html || `<span class="muted">Нет числовых рядов для графика.</span>`;
+}
+
+// ---- Traceroute history (route changes over time) ----
+async function loadTraceHistory(nodeId) {
+  const box = $("#profileTraceHist");
+  if (!box) return;
+  let data;
+  try { data = await api(`/api/mesh/traceroute/history?dest=${encodeURIComponent(nodeId)}`); }
+  catch { box.className = "trace-hist"; box.innerHTML = `<span class="muted">Не удалось загрузить.</span>`; return; }
+  if (!Array.isArray(data) || !data.length) {
+    box.className = "trace-hist";
+    box.innerHTML = `<span class="muted">Пока нет записей — нажми «🛰 Traceroute», результат сохранится сюда.</span>`;
+    return;
+  }
+  const nameOf = (id) => {
+    const n = KNOWN_NODES.find(x => x.node_id === id);
+    return n ? (n.short_name || n.long_name || id) : id;
+  };
+  const routeStr = (route) => (route && route.length)
+    ? route.map(nameOf).map(escapeHtml).join(" → ")
+    : "🎯 прямая видимость";
+  let html = "";
+  for (let i = 0; i < data.length; i++) {
+    const e = data[i];
+    const older = data[i + 1];   // chronologically previous (data is newest-first)
+    const changed = older && JSON.stringify(e.route) !== JSON.stringify(older.route);
+    const okIcon = e.ok ? "" : ` <span style="color:var(--danger)">⚠️ нет ответа</span>`;
+    const tag = changed ? ` <span class="th-changed">маршрут изменился</span>` : "";
+    html += `<div class="th-row"><div class="th-when">${relTime(e.time)}${okIcon}${tag}</div>`
+          + `<div class="th-route">${routeStr(e.route)}</div></div>`;
+  }
+  box.className = "trace-hist";
+  box.innerHTML = html;
+}
+
 // Click on backdrop or × closes the modal
 document.getElementById("nodeProfile")?.addEventListener("click", (e) => {
   if (e.target.matches("[data-close]")) closeNodeProfile();
@@ -652,7 +748,25 @@ document.addEventListener("keydown", (e) => {
 // ---------- Map (Leaflet) ----------
 let MAP = null;
 let MAP_MARKER_LAYER = null;
+let MAP_COVERAGE_LAYER = null;   // translucent circles coloured by SNR (coverage)
 let MAP_RETRIES = 0;
+
+// Colour a node pin by how recently we heard it (freshness).
+function _freshnessColor(lastHeard) {
+  if (!lastHeard) return "#8a93a8";                 // unknown — grey
+  const age = Date.now() / 1000 - Number(lastHeard);
+  if (age < 7200)  return "#5eeb8e";                // < 2h — green
+  if (age < 43200) return "#ffc24a";                // < 12h — amber
+  return "#8a93a8";                                  // older — grey
+}
+// Colour a coverage circle by SNR (signal quality).
+function _snrColor(snr) {
+  if (snr == null) return "#8a93a8";
+  const s = Number(snr);
+  if (s >= 5)  return "#5eeb8e";   // strong
+  if (s >= 0)  return "#ffc24a";   // ok
+  return "#ff7a8a";                // weak / noisy
+}
 let TRACEROUTE_LAYER = null;          // Leaflet layer-group with the active traceroute drawing
 let LAST_TRACEROUTE = null;           // Latest traceroute result (for "Show on map" button)
 
@@ -927,8 +1041,15 @@ function ensureMap() {
     attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
   }).addTo(MAP);
   MAP_MARKER_LAYER = L.layerGroup().addTo(MAP);
+  MAP_COVERAGE_LAYER = L.layerGroup();   // added/removed via the «Покрытие» toggle
   return MAP;
 }
+
+document.getElementById("mapCoverage")?.addEventListener("change", (e) => {
+  if (!MAP || !MAP_COVERAGE_LAYER) return;
+  if (e.target.checked) MAP_COVERAGE_LAYER.addTo(MAP);
+  else MAP.removeLayer(MAP_COVERAGE_LAYER);
+});
 
 async function refreshMap() {
   const map = ensureMap();
@@ -961,6 +1082,7 @@ async function refreshMap() {
       if (info) info.textContent = `Узлов с координатами: 0 (всего узлов: ${KNOWN_NODES.length})`;
       return;
     }
+    if (MAP_COVERAGE_LAYER) MAP_COVERAGE_LAYER.clearLayers();
     const bounds = [];
     for (const n of withPos) {
       const lat = Number(n.latitude), lon = Number(n.longitude);
@@ -969,12 +1091,26 @@ async function refreshMap() {
       const short = n.short_name ? ` [${n.short_name}]` : "";
       const age = n.last_heard ? relTime(n.last_heard) : "—";
       const snr = n.snr != null ? `<br>SNR: ${Number(n.snr).toFixed(1)}` : "";
+      const batt = n.battery_level != null ? `<br>🔋 ${n.battery_level}%` : "";
       const alt = Number.isFinite(n.altitude) ? `<br>Высота: ${Math.round(n.altitude)} м` : "";
       const popup = `<strong>${escapeHtml(long)}</strong>${escapeHtml(short)}<br>` +
                     `<span class="muted">${lat.toFixed(4)}, ${lon.toFixed(4)}</span><br>` +
-                    `Слышали: ${age}${snr}${alt}` +
+                    `Слышали: ${age}${snr}${batt}${alt}` +
                     `<br><a href="#" class="map-profile-link" data-node-id="${escapeHtml(n.node_id)}">Открыть профиль →</a>`;
-      L.marker([lat, lon]).addTo(MAP_MARKER_LAYER).bindPopup(popup);
+      // Colour-coded pin by freshness.
+      const color = _freshnessColor(n.last_heard);
+      const icon = L.divIcon({
+        className: "node-map-marker",
+        html: `<span class="nmm-dot" style="background:${color}"></span>`,
+        iconSize: [18, 18], iconAnchor: [9, 9], popupAnchor: [0, -8],
+      });
+      L.marker([lat, lon], { icon }).addTo(MAP_MARKER_LAYER).bindPopup(popup);
+      // Coverage circle coloured by SNR (lives in its own toggled layer).
+      if (MAP_COVERAGE_LAYER) {
+        L.circleMarker([lat, lon], {
+          radius: 22, weight: 0, fillColor: _snrColor(n.snr), fillOpacity: 0.28,
+        }).addTo(MAP_COVERAGE_LAYER);
+      }
     }
     // Delegate clicks inside popups to the node-profile modal
     map.off("popupopen").on("popupopen", (e) => {
@@ -2814,6 +2950,8 @@ async function saveLlmConfig() {
     enabled:         $("#llmEnabled").checked,
     base_url:        $("#llmBaseUrl").value.trim() || "https://integrate.api.nvidia.com/v1",
     model:           $("#llmModel").value.trim() || "moonshotai/kimi-k2-instruct",
+    fallback_models: $("#llmFallback").value.split(",").map(s => s.trim()).filter(Boolean),
+    context_memory:  $("#llmContextMemory").checked,
     system_prompt:   $("#llmSystemPrompt").value.trim(),
     max_tokens:      Math.max(16, parseInt($("#llmMaxTokens").value, 10) || 200),
     max_reply_chars: Math.max(50, parseInt($("#llmMaxChars").value, 10) || 600),
@@ -2844,6 +2982,8 @@ async function refreshLlmStatus() {
   if (!$("#llmApiKey").value && s.api_key_set) $("#llmApiKey").placeholder = "(ключ сохранён — впиши чтобы заменить)";
   if (!$("#llmBaseUrl").value) $("#llmBaseUrl").value = s.base_url || "";
   if (!$("#llmModel").value) $("#llmModel").value = s.model || "";
+  if (!$("#llmFallback").value && s.fallback_models) $("#llmFallback").value = s.fallback_models;
+  if (typeof s.context_memory === "boolean") $("#llmContextMemory").checked = s.context_memory;
   if (!$("#llmSystemPrompt").value) $("#llmSystemPrompt").value = s.system_prompt || "";
   if (s.max_tokens != null && $("#llmMaxTokens").value === "200") $("#llmMaxTokens").value = s.max_tokens;
   if (s.max_reply_chars != null && $("#llmMaxChars").value === "600") $("#llmMaxChars").value = s.max_reply_chars;

@@ -39,6 +39,9 @@ DEFAULTS = {
     # small token budget (reasoning models like kimi-k2.6 spend the budget
     # "thinking" and need max_tokens >= ~1500).
     "model": "moonshotai/kimi-k2",
+    # Tried in order if the primary model errors/times out/returns empty. Either
+    # a list or a comma-separated string of model ids on the same base_url/key.
+    "fallback_models": [],
     "system_prompt": (
         "Ты — ассистент в автономной LoRa mesh-сети. Отвечай по-русски, "
         "максимально кратко и по делу: 1–3 коротких предложения, без markdown, "
@@ -50,6 +53,8 @@ DEFAULTS = {
     "proxy": "",
     "max_reply_chars": 600,
     "timeout_seconds": 40,
+    # Remember the last few /ai turns per node for follow-up questions.
+    "context_memory": True,
 }
 
 
@@ -74,27 +79,29 @@ def is_enabled(cfg: dict[str, Any]) -> bool:
     return bool(c.get("enabled") and c.get("api_key") and c.get("model"))
 
 
-def ask(question: str, cfg: dict[str, Any], system_override: Optional[str] = None) -> str:
-    """Send a single-turn question to the LLM and return the answer text.
+def _model_candidates(c: dict[str, Any]) -> list[str]:
+    """Primary model first, then fallbacks (list or comma-string), deduped."""
+    models = [c.get("model")]
+    fb = c.get("fallback_models") or []
+    if isinstance(fb, str):
+        fb = fb.split(",")
+    models.extend(fb)
+    out: list[str] = []
+    seen: set[str] = set()
+    for m in models:
+        m = (m or "").strip()
+        if m and m not in seen:
+            seen.add(m)
+            out.append(m)
+    return out
 
-    Raises RuntimeError with a human-readable message on failure.
-    """
-    c = _cfg(cfg)
-    if not c.get("api_key"):
-        raise RuntimeError("LLM не настроен: не задан api_key")
-    if not c.get("model"):
-        raise RuntimeError("LLM не настроен: не задана модель")
-    base = (c.get("base_url") or "").rstrip("/")
-    if not base:
-        raise RuntimeError("LLM не настроен: не задан base_url")
 
-    url = f"{base}/chat/completions"
+def _complete(c: dict[str, Any], model: str, messages: list[dict[str, str]]) -> str:
+    """One chat-completion call against `model`. Raises RuntimeError on failure."""
+    url = f"{(c.get('base_url') or '').rstrip('/')}/chat/completions"
     payload = {
-        "model": c["model"],
-        "messages": [
-            {"role": "system", "content": system_override or c["system_prompt"]},
-            {"role": "user", "content": question},
-        ],
+        "model": model,
+        "messages": messages,
         "max_tokens": int(c.get("max_tokens") or 200),
         "temperature": float(c.get("temperature") or 0.6),
         "stream": False,
@@ -111,15 +118,14 @@ def ask(question: str, cfg: dict[str, Any], system_override: Optional[str] = Non
             timeout=int(c.get("timeout_seconds") or 40),
         )
     except Exception as exc:
-        log.exception("LLM request failed")
         raise RuntimeError(f"Ошибка сети при запросе к LLM: {exc}") from exc
 
     if r.status_code == 401:
         raise RuntimeError("LLM: неверный api_key (401)")
     if r.status_code == 404:
-        raise RuntimeError("LLM: не найден endpoint/модель (404) — проверь base_url и model")
+        raise RuntimeError(f"LLM: модель/endpoint не найдены (404) для «{model}»")
     if r.status_code == 429:
-        raise RuntimeError("LLM: превышен лимит запросов (429), попробуй позже")
+        raise RuntimeError("LLM: превышен лимит запросов (429)")
     if not r.ok:
         snippet = (r.text or "")[:200]
         raise RuntimeError(f"LLM вернул {r.status_code}: {snippet}")
@@ -134,13 +140,11 @@ def ask(question: str, cfg: dict[str, Any], system_override: Optional[str] = Non
     text = (text or "").strip()
     if not text:
         # Reasoning/"thinking" models (e.g. kimi-k2.6) can burn the whole token
-        # budget on internal reasoning and return empty content. Detect that and
-        # give actionable advice instead of a cryptic "empty answer".
+        # budget on internal reasoning and return empty content.
         if message.get("reasoning") or message.get("reasoning_content"):
             raise RuntimeError(
                 "Модель потратила лимит на «размышления» и не выдала ответ. "
-                "Подними max_tokens (≥1500) или выбери модель без reasoning, "
-                "например moonshotai/kimi-k2."
+                "Подними max_tokens (≥1500) или выбери модель без reasoning."
             )
         raise RuntimeError("LLM вернул пустой ответ")
 
@@ -148,6 +152,45 @@ def ask(question: str, cfg: dict[str, Any], system_override: Optional[str] = Non
     if len(text) > cap:
         text = text[:cap - 1].rstrip() + "…"
     return text
+
+
+def ask(question: str, cfg: dict[str, Any], system_override: Optional[str] = None,
+        history: Optional[list[dict[str, str]]] = None) -> str:
+    """Ask the LLM and return the answer text. Tries the primary model, then any
+    `fallback_models` on failure. `history` is an optional list of prior
+    {role, content} turns (for short conversational memory).
+
+    Raises RuntimeError with a human-readable message if every model fails.
+    """
+    c = _cfg(cfg)
+    if not c.get("api_key"):
+        raise RuntimeError("LLM не настроен: не задан api_key")
+    if not c.get("model"):
+        raise RuntimeError("LLM не настроен: не задана модель")
+    if not (c.get("base_url") or "").strip():
+        raise RuntimeError("LLM не настроен: не задан base_url")
+
+    messages: list[dict[str, str]] = [
+        {"role": "system", "content": system_override or c["system_prompt"]}
+    ]
+    for h in (history or [])[-8:]:
+        role = h.get("role")
+        content = (h.get("content") or "").strip()
+        if role in ("user", "assistant") and content:
+            messages.append({"role": role, "content": content})
+    messages.append({"role": "user", "content": question})
+
+    models = _model_candidates(c)
+    last_err: Optional[Exception] = None
+    for i, model in enumerate(models):
+        try:
+            return _complete(c, model, messages)
+        except RuntimeError as exc:
+            last_err = exc
+            if i + 1 < len(models):
+                log.warning("LLM model %s failed (%s) — trying fallback %s",
+                            model, exc, models[i + 1])
+    raise last_err or RuntimeError("LLM: нет доступных моделей")
 
 
 def test_connection(cfg: dict[str, Any]) -> dict[str, Any]:

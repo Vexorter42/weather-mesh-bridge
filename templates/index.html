@@ -205,6 +205,10 @@
           <span id="mapInfo">…</span>
           <span class="map-foot-controls">
             <label class="toggle-row" style="margin: 0; padding: 4px 8px;">
+              <input type="checkbox" id="mapCoverage">
+              <span>📶 Покрытие (SNR)</span>
+            </label>
+            <label class="toggle-row" style="margin: 0; padding: 4px 8px;">
               <input type="checkbox" id="radarEnabled">
               <span>🌧 Радар осадков</span>
             </label>
@@ -549,6 +553,9 @@
                 <input type="text" id="llmModel" placeholder="moonshotai/kimi-k2">
               </label>
             </div>
+            <label>Запасные модели <small>(через запятую — пробуются по очереди, если основная упала/пустая)</small>
+              <input type="text" id="llmFallback" placeholder="google/gemini-2.5-flash, openai/gpt-4.1-mini">
+            </label>
             <p class="hint">
               🌐 Прокси для LLM-API настраивается во вкладке <strong>Прокси</strong>
               (тумблер «LLM»).
@@ -569,6 +576,10 @@
                 <input type="number" id="llmTemp" min="0" max="2" step="0.1" value="0.6">
               </label>
             </div>
+            <label class="toggle-row">
+              <input type="checkbox" id="llmContextMemory" checked>
+              <span><strong>Помнить контекст диалога</strong> — бот держит последние реплики каждого узла (30 мин), чтобы понимать уточняющие вопросы по <code>/ai</code></span>
+            </label>
 
             <div class="row">
               <button id="llmSave">💾 Сохранить</button>

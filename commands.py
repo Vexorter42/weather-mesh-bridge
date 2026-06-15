@@ -345,6 +345,32 @@ def cmd_full(args, msg, bridge, cfg):
     )
 
 
+# Short per-node conversational memory for /ai (so follow-up questions keep
+# context). Kept in RAM only; entries expire after TTL.
+_AI_MEMORY: dict[str, list[dict[str, Any]]] = {}
+_AI_MEMORY_TTL = 1800      # 30 min
+_AI_MEMORY_TURNS = 4       # keep the last N exchanges (2 messages each)
+
+
+def _ai_history(node_id: Optional[str]) -> list[dict[str, str]]:
+    if not node_id:
+        return []
+    now = time.time()
+    items = [m for m in _AI_MEMORY.get(node_id, []) if now - m["ts"] < _AI_MEMORY_TTL]
+    _AI_MEMORY[node_id] = items
+    return [{"role": m["role"], "content": m["content"]} for m in items]
+
+
+def _ai_remember(node_id: Optional[str], role: str, content: str) -> None:
+    if not node_id:
+        return
+    lst = _AI_MEMORY.setdefault(node_id, [])
+    lst.append({"role": role, "content": content, "ts": time.time()})
+    keep = _AI_MEMORY_TURNS * 2
+    if len(lst) > keep:
+        del lst[: len(lst) - keep]
+
+
 @command(
     "ai", "ии", "gpt", "спроси", "ask",
     help_text="/ai <вопрос> — спросить ИИ (ответ кратко, в эфир)",
@@ -357,11 +383,18 @@ def cmd_ai(args, msg, bridge, cfg):
     question = " ".join(args).strip()
     if len(question) > 600:
         question = question[:600]
+    node_id = msg.get("from_id")
+    use_ctx = bool((cfg.get("llm") or {}).get("context_memory", True))
+    history = _ai_history(node_id) if use_ctx else None
     try:
-        return llm.ask(question, cfg)
+        answer = llm.ask(question, cfg, history=history)
     except Exception as exc:
         log.warning("/ai failed: %s", exc)
         return f"ИИ недоступен: {exc}"
+    if use_ctx:
+        _ai_remember(node_id, "user", question)
+        _ai_remember(node_id, "assistant", answer)
+    return answer
 
 
 @command(

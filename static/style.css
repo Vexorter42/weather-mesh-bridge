@@ -266,6 +266,55 @@ html[data-theme="light"] .toast { background: rgba(26, 35, 52, 0.94); }
 .ag-fill.warn { background: linear-gradient(90deg, var(--good), var(--warn)); }
 .ag-fill.danger { background: linear-gradient(90deg, var(--warn), var(--danger)); }
 
+/* ---------- Node telemetry sparklines (profile) ---------- */
+.node-charts { display: flex; flex-direction: column; gap: 12px; margin-top: 6px; }
+.nc-row {
+  background: var(--glass-bg-soft);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+}
+.nc-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  font-size: 0.84rem;
+  color: var(--text-soft);
+  margin-bottom: 4px;
+}
+.nc-last { font-weight: 700; color: var(--text); font-variant-numeric: tabular-nums; }
+.nc-spark { display: block; width: 100%; height: 38px; }
+
+/* ---------- Colour-coded node pins on the map ---------- */
+/* ---------- Traceroute history list (profile) ---------- */
+.trace-hist { display: flex; flex-direction: column; gap: 8px; margin-top: 6px; }
+.th-row {
+  background: var(--glass-bg-soft);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-sm);
+  padding: 7px 10px;
+}
+.th-when { font-size: 0.76rem; color: var(--muted); margin-bottom: 2px; }
+.th-route { font-size: 0.9rem; color: var(--text-soft); word-break: break-word; }
+.th-changed {
+  color: var(--warn);
+  font-weight: 700;
+  border: 1px solid var(--warn);
+  border-radius: 999px;
+  padding: 0 6px;
+  font-size: 0.72rem;
+}
+
+.node-map-marker { background: none; border: none; }
+.nmm-dot {
+  display: block;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 2px solid #fff;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.35), 0 1px 4px rgba(0, 0, 0, 0.5);
+}
+
 .app-body {
   flex: 1;
   display: flex;
