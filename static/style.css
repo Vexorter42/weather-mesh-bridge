@@ -238,6 +238,8 @@ html[data-theme="light"] .toast { background: rgba(26, 35, 52, 0.94); }
   border-color: var(--glass-border-strong);
   transform: rotate(-12deg) scale(1.05);
 }
+.lang-toggle { font-size: 0.8rem; font-weight: 700; letter-spacing: 0.02em; }
+.lang-toggle:hover { transform: scale(1.05); }   /* no rotate for text */
 
 /* ---------- Airtime gauge (LoRa channel load) ---------- */
 .airtime-gauge { margin: 12px 0; }
