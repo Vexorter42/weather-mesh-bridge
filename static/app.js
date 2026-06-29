@@ -55,7 +55,7 @@ function buildRfMeta(m) {
 
 function toast(msg, kind = "") {
   const el = $("#toast");
-  el.textContent = msg;
+  el.textContent = (typeof t === "function") ? t(msg) : msg;
   el.className = "toast show " + kind;
   setTimeout(() => el.classList.remove("show"), 2400);
 }
@@ -235,13 +235,13 @@ function renderAirtime(a) {
 function renderDashboard(s, nodes) {
   const conn = $("#statConn");
   if (s.mesh_connected) {
-    conn.textContent = "Подключено";
+    conn.textContent = t("Подключено");
     conn.className = "stat-value good";
   } else {
-    conn.textContent = "Нет связи";
+    conn.textContent = t("Нет связи");
     conn.className = "stat-value bad";
   }
-  $("#statConnSub").textContent = s.mesh_connected ? "Heltec на связи" : "Проверь настройки";
+  $("#statConnSub").textContent = s.mesh_connected ? t("Heltec на связи") : t("Проверь настройки");
   $("#statNodes").textContent = s.mesh_nodes_known ?? "—";
   $("#statSenders").textContent = s.unique_senders_24h ?? 0;
   $("#statTotal").textContent = s.total_messages ?? 0;
@@ -2953,7 +2953,7 @@ async function refreshHealth() {
   const dot = (ok) => ok == null ? `<span class="hd-dot idle"></span>`
                                  : `<span class="hd-dot ${ok ? "ok" : "bad"}"></span>`;
   const row = (label, val, ok) =>
-    `<div class="hd-row">${dot(ok)}<span class="hd-label">${label}</span>` +
+    `<div class="hd-row">${dot(ok)}<span class="hd-label">${escapeHtml(t(label))}</span>` +
     `<span class="hd-val">${escapeHtml(String(val))}</span></div>`;
 
   const up = h.uptime_seconds || 0;
@@ -2966,13 +2966,13 @@ async function refreshHealth() {
   const xrayOk = h.xray_active === "active";
 
   let html = "";
-  html += row("Нода Heltec", h.mesh_connected ? `на связи · ${h.nodes_online_2h ?? 0} онлайн` : "нет связи", !!h.mesh_connected);
+  html += row("Нода Heltec", h.mesh_connected ? `${t("на связи")} · ${h.nodes_online_2h ?? 0} ${t("онлайн")}` : t("нет связи"), !!h.mesh_connected);
   html += row("Погода (Open-Meteo)",
-    wxOk ? `ок · ${relTime(h.weather_last_ok_ts)}`
-         : (h.location_set ? "нет свежих данных" : "город не задан"),
+    wxOk ? `${t("ок")} · ${relTime(h.weather_last_ok_ts)}`
+         : (h.location_set ? t("нет свежих данных") : t("город не задан")),
     wxOk ? true : (h.location_set ? false : null));
   html += row("Прокси",
-    h.proxy_via ? `через прокси · выход ${h.proxy_exit_ip || "?"}` : "напрямую (без прокси)",
+    h.proxy_via ? `${t("через прокси · выход")} ${h.proxy_exit_ip || "?"}` : t("напрямую (без прокси)"),
     h.proxy_via ? !!h.proxy_exit_ip : null);
   html += row("Xray", h.xray_active || "—", xrayOk);
   html += row("Диск",
