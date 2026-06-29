@@ -99,6 +99,7 @@ $$(".tab-btn").forEach(btn => {
     } else if (CURRENT_TAB === "map") {
       refreshMap();
     } else if (CURRENT_TAB === "misc") {
+      refreshHealth();
       refreshTelegramStatus();
       refreshUpdateInfo();
       refreshTgStatusBot();
@@ -2866,12 +2867,98 @@ function setNcStatus(kind, text) {
   if (txt) txt.textContent = text;
 }
 
+// ---------- Backup / restore ----------
+$("#backupDownload")?.addEventListener("click", () => {
+  const dbs = $("#backupDbs")?.checked ? "?dbs=1" : "";
+  const a = document.createElement("a");
+  a.href = `/api/backup/download${dbs}`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  toast("Бэкап скачивается…", "ok");
+});
+$("#backupRestoreBtn")?.addEventListener("click", () => $("#backupFile")?.click());
+$("#backupFile")?.addEventListener("change", async (e) => {
+  const file = e.target.files?.[0];
+  if (!file) return;
+  if (!confirm(`Восстановить настройки из «${file.name}»? Текущие будут перезаписаны, сервис перезапустится.`)) {
+    e.target.value = "";
+    return;
+  }
+  const out = $("#backupResult");
+  out.hidden = false; out.className = "tg-test-result";
+  out.innerHTML = `<span class="muted">⏳ Загружаю и восстанавливаю…</span>`;
+  try {
+    const fd = new FormData();
+    fd.append("file", file);
+    const res = await fetch("/api/backup/restore", { method: "POST", body: fd });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+    out.className = "tg-test-result ok";
+    out.innerHTML = `✅ <strong>Восстановлено:</strong> ${escapeHtml((data.restored || []).join(", "))}`
+      + `<div class="muted" style="margin-top:4px">Сервис перезапускается, страница переподключится через ~10 сек…</div>`;
+    setTimeout(() => location.reload(), 10000);
+  } catch (err) {
+    out.className = "tg-test-result err";
+    out.innerHTML = `❌ ${escapeHtml(err.message)}`;
+  }
+  e.target.value = "";
+});
+
+// ---------- Health / self-diagnostics ----------
+$("#healthRefresh")?.addEventListener("click", refreshHealth);
+
+async function refreshHealth() {
+  const box = $("#healthGrid");
+  if (!box) return;
+  let h;
+  try { h = await api("/api/health/full"); }
+  catch (e) { box.innerHTML = `<div class="muted">Ошибка: ${escapeHtml(e.message)}</div>`; return; }
+
+  const dot = (ok) => ok == null ? `<span class="hd-dot idle"></span>`
+                                 : `<span class="hd-dot ${ok ? "ok" : "bad"}"></span>`;
+  const row = (label, val, ok) =>
+    `<div class="hd-row">${dot(ok)}<span class="hd-label">${label}</span>` +
+    `<span class="hd-val">${escapeHtml(String(val))}</span></div>`;
+
+  const up = h.uptime_seconds || 0;
+  const upStr = up < 3600 ? `${Math.round(up / 60)} мин`
+              : up < 86400 ? `${(up / 3600).toFixed(1)} ч`
+              : `${(up / 86400).toFixed(1)} дн`;
+  const wxOk = h.weather_last_ok_ts && (Date.now() / 1000 - h.weather_last_ok_ts) < 3600;
+  const disk = h.disk || {};
+  const diskOk = disk.used_pct == null ? null : disk.used_pct < 90;
+  const xrayOk = h.xray_active === "active";
+
+  let html = "";
+  html += row("Нода Heltec", h.mesh_connected ? `на связи · ${h.nodes_online_2h ?? 0} онлайн` : "нет связи", !!h.mesh_connected);
+  html += row("Погода (Open-Meteo)",
+    wxOk ? `ок · ${relTime(h.weather_last_ok_ts)}`
+         : (h.location_set ? "нет свежих данных" : "город не задан"),
+    wxOk ? true : (h.location_set ? false : null));
+  html += row("Прокси",
+    h.proxy_via ? `через прокси · выход ${h.proxy_exit_ip || "?"}` : "напрямую (без прокси)",
+    h.proxy_via ? !!h.proxy_exit_ip : null);
+  html += row("Xray", h.xray_active || "—", xrayOk);
+  html += row("Диск",
+    disk.free_gb != null ? `${disk.free_gb} ГБ свободно · занято ${disk.used_pct}%` : "—", diskOk);
+  html += row("Аптайм сервиса", upStr, null);
+  html += row("Версия", h.version || "—", null);
+  box.innerHTML = html;
+}
+
 // ---------- Прокси (общий, с тумблерами по сервисам) ----------
 
 function wireProxyPanel() {
   $("#proxySave")?.addEventListener("click", saveProxyConfig);
   $("#proxyRefresh")?.addEventListener("click", loadProxyConfig);
   $("#proxyTest")?.addEventListener("click", testProxy);
+  $("#proxySubLoad")?.addEventListener("click", loadProxySubscription);
+  $("#proxyExitApply")?.addEventListener("click", applyProxyExit);
+  $("#proxyAutoSwitch")?.addEventListener("change", async (e) => {
+    try { await api("/api/config", { method: "POST", body: { proxy: { auto_switch: e.target.checked } } }); }
+    catch (err) { toast(err.message, "err"); }
+  });
 }
 
 async function loadProxyConfig() {
@@ -2886,6 +2973,66 @@ async function loadProxyConfig() {
   set("#proxyUseTelegram", p.use_telegram);
   set("#proxyUseLlm",      p.use_llm);
   set("#proxyUseTgstatus", p.use_tgstatus);
+  if ($("#proxyAutoSwitch")) $("#proxyAutoSwitch").checked = !!p.auto_switch;
+  if ($("#proxySubUrl") && p.subscription_url) $("#proxySubUrl").placeholder = "(подписка сохранена — впиши, чтобы заменить)";
+  loadProxyExits();
+}
+
+function _renderExitOptions(exits, selected) {
+  const sel = $("#proxyExitSelect");
+  if (!sel) return;
+  if (!exits || !exits.length) {
+    sel.innerHTML = `<option value="">— сначала загрузи подписку —</option>`;
+    return;
+  }
+  sel.innerHTML = exits.map(e =>
+    `<option value="${e.index}"${e.index === selected ? " selected" : ""}>${escapeHtml(e.name || e.host)}</option>`
+  ).join("");
+}
+
+async function loadProxyExits() {
+  let d;
+  try { d = await api("/api/proxy/exits"); }
+  catch { return; }
+  _renderExitOptions(d.exits, d.selected);
+  if ($("#proxyAutoSwitch")) $("#proxyAutoSwitch").checked = !!d.auto_switch;
+}
+
+async function loadProxySubscription() {
+  const out = $("#proxyMgrResult");
+  const url = $("#proxySubUrl").value.trim();
+  out.hidden = false; out.className = "tg-test-result";
+  out.innerHTML = `<span class="muted">⏳ Получаю подписку…</span>`;
+  try {
+    const body = url ? { url } : {};
+    const r = await api("/api/proxy/subscription", { method: "POST", body });
+    _renderExitOptions(r.exits, null);
+    out.className = "tg-test-result ok";
+    out.innerHTML = `✅ Загружено выходов: <strong>${r.count}</strong>. Выбери страну и нажми «Переключить».`;
+    $("#proxySubUrl").value = "";
+  } catch (e) {
+    out.className = "tg-test-result err";
+    out.innerHTML = `❌ ${escapeHtml(e.message)}`;
+  }
+}
+
+async function applyProxyExit() {
+  const sel = $("#proxyExitSelect");
+  const index = sel?.value;
+  if (index === "" || index == null) { toast("Сначала загрузи подписку и выбери страну", "err"); return; }
+  const out = $("#proxyMgrResult");
+  out.hidden = false; out.className = "tg-test-result";
+  out.innerHTML = `<span class="muted">⏳ Переключаю выход и перезапускаю Xray…</span>`;
+  try {
+    const r = await api("/api/proxy/select", { method: "POST", body: { index: parseInt(index, 10) } });
+    out.className = "tg-test-result ok";
+    out.innerHTML = `✅ <strong>${escapeHtml(r.exit_name || "выход")}</strong>`
+      + `<div class="muted" style="margin-top:4px">Внешний IP: ${escapeHtml(r.exit_ip || "проверь кнопкой «Проверить»")}</div>`;
+    loadProxyConfig();
+  } catch (e) {
+    out.className = "tg-test-result err";
+    out.innerHTML = `❌ ${escapeHtml(e.message)}`;
+  }
 }
 
 async function saveProxyConfig() {

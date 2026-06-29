@@ -6,12 +6,16 @@ Then open http://<raspberry-ip>:5000 from any device on the LAN.
 """
 from __future__ import annotations
 
+import io
 import json
 import logging
 import os
+import shutil
+import subprocess
 import threading
 import time
 import uuid
+import zipfile
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Optional
@@ -28,6 +32,7 @@ commands.BOT_START_TS = time.time()
 import weather
 import weather_alerts
 import rain_nowcast
+import proxy_manager
 from chat_db import ChatDb
 from history_db import HistoryDb
 from meshbridge import MeshBridge
@@ -41,13 +46,17 @@ logging.basicConfig(
 )
 log = logging.getLogger("weather-mesh-bridge")
 
+VERSION = "2.9.0"
+
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "config.json"
 PRESETS_PATH = BASE_DIR / "presets.local.json"
+BACKUPS_DIR = BASE_DIR / "backups"
 
 DAYS_ORDER = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 
-# Central outbound-proxy config. One URL, per-service on/off toggles.
+# Central outbound-proxy config. One URL, per-service on/off toggles, plus the
+# managed-Xray fields (subscription + chosen exit) for the «Прокси» tab.
 PROXY_DEFAULTS = {
     "url": "",             # socks5://host:port / http://host:port — empty = direct
     "use_weather": True,   # Open-Meteo (forecast/air/water/yesterday)
@@ -55,7 +64,15 @@ PROXY_DEFAULTS = {
     "use_telegram": True,  # Telegram bridge (t.me scrape / MTProto)
     "use_llm": True,       # LLM API
     "use_tgstatus": True,  # Telegram status-bot
+    # Managed Xray (optional): bot drives a local VLESS tunnel from a subscription.
+    "subscription_url": "",
+    "exit_index": None,
+    "exit_name": "",
+    "managed": False,
+    "auto_switch": False,
 }
+
+SUB_CACHE_PATH = BASE_DIR / "xray_sub.txt"   # decoded subscription (has UUIDs, gitignored)
 
 
 def _proxy_for(cfg: dict[str, Any], service: str) -> str:
@@ -749,6 +766,165 @@ def api_set_config():
     return jsonify(cfg)
 
 
+# ---------------------------------------------------------------------------
+# Config backup / restore
+# ---------------------------------------------------------------------------
+
+_BACKUP_CORE = ("config.json", "presets.local.json", "alerts_state.json", "nowcast_state.json")
+_BACKUP_DBS = ("chat.db", "history.db")
+_RESTORE_ALLOWED = set(_BACKUP_CORE) | set(_BACKUP_DBS)
+
+
+def _make_backup_zip(include_dbs: bool) -> bytes:
+    """Zip of settings/state (+ optionally the SQLite DBs) as bytes."""
+    names = list(_BACKUP_CORE) + (list(_BACKUP_DBS) if include_dbs else [])
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("wmb-backup-manifest.json", json.dumps(
+            {"version": VERSION, "created": datetime.utcnow().isoformat() + "Z",
+             "include_dbs": include_dbs}, ensure_ascii=False, indent=2))
+        for name in names:
+            p = BASE_DIR / name
+            if p.exists():
+                z.write(p, name)
+    return buf.getvalue()
+
+
+def _self_restart_later() -> None:
+    """Restart the service shortly after the current response is flushed."""
+    def go():
+        time.sleep(1.2)
+        try:
+            subprocess.run(["sudo", "systemctl", "restart", "weather-mesh-bridge"], timeout=15)
+        except Exception:
+            log.exception("Self-restart via systemctl failed; exiting for systemd respawn")
+            os._exit(0)
+    threading.Thread(target=go, daemon=True).start()
+
+
+@app.route("/api/backup/download", methods=["GET"])
+def api_backup_download():
+    include_dbs = request.args.get("dbs") in ("1", "true", "yes")
+    data = _make_backup_zip(include_dbs)
+    fname = f"wmb-backup-{datetime.now().strftime('%Y%m%d-%H%M')}.zip"
+    return Response(data, mimetype="application/zip", headers={
+        "Content-Disposition": f"attachment; filename={fname}",
+        "Content-Length": str(len(data)),
+    })
+
+
+@app.route("/api/backup/restore", methods=["POST"])
+def api_backup_restore():
+    f = request.files.get("file")
+    if not f:
+        return jsonify({"error": "Файл не передан"}), 400
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(f.read()))
+    except Exception:
+        return jsonify({"error": "Это не zip-архив бэкапа"}), 400
+    names = set(zf.namelist())
+    if "config.json" not in names:
+        return jsonify({"error": "В архиве нет config.json — не похоже на бэкап WMB"}), 400
+    try:
+        json.loads(zf.read("config.json").decode("utf-8"))
+    except Exception as exc:
+        return jsonify({"error": f"config.json в архиве битый: {exc}"}), 400
+    # Safety net: snapshot the current state before overwriting.
+    try:
+        BACKUPS_DIR.mkdir(exist_ok=True)
+        (BACKUPS_DIR / f"pre-restore-{datetime.now().strftime('%Y%m%d-%H%M%S')}.zip"
+         ).write_bytes(_make_backup_zip(True))
+    except Exception:
+        log.exception("Pre-restore snapshot failed (continuing anyway)")
+    restored = []
+    with _cfg_lock:
+        for name in names:
+            if name in _RESTORE_ALLOWED:
+                (BASE_DIR / name).write_bytes(zf.read(name))
+                restored.append(name)
+    _self_restart_later()
+    return jsonify({"ok": True, "restored": sorted(restored), "restarting": True})
+
+
+def _start_autobackup(interval_seconds: int = 86400, keep: int = 14) -> threading.Thread:
+    """Write a timestamped settings backup to backups/ daily; keep the last N."""
+    def loop():
+        time.sleep(300)
+        while True:
+            try:
+                BACKUPS_DIR.mkdir(exist_ok=True)
+                (BACKUPS_DIR / f"auto-{datetime.now().strftime('%Y%m%d-%H%M')}.zip"
+                 ).write_bytes(_make_backup_zip(False))
+                for old in sorted(BACKUPS_DIR.glob("auto-*.zip"))[:-keep]:
+                    old.unlink(missing_ok=True)
+            except Exception:
+                log.exception("Auto-backup failed (will retry)")
+            time.sleep(interval_seconds)
+
+    t = threading.Thread(target=loop, daemon=True, name="auto-backup")
+    t.start()
+    return t
+
+
+_start_autobackup()
+
+
+def _rotate_proxy_exit() -> None:
+    """Switch the managed Xray tunnel to the next exit in the subscription."""
+    if not SUB_CACHE_PATH.exists():
+        return
+    exits = proxy_manager.public_exits(proxy_manager.parse_exits(
+        SUB_CACHE_PATH.read_text(encoding="utf-8")))
+    if not exits:
+        return
+    idxs = [e["index"] for e in exits]
+    cur = (load_config().get("proxy") or {}).get("exit_index")
+    pos = idxs.index(cur) if cur in idxs else -1
+    nxt = idxs[(pos + 1) % len(idxs)]
+    full = proxy_manager.parse_exits(SUB_CACHE_PATH.read_text(encoding="utf-8"))
+    match = next((e for e in full if e["index"] == nxt), None)
+    if not match:
+        return
+    proxy_manager.apply_exit(match["uri"])
+    with _cfg_lock:
+        c = load_config()
+        c["proxy"] = {**PROXY_DEFAULTS, **(c.get("proxy") or {})}
+        c["proxy"].update(exit_index=nxt, exit_name=match.get("name") or "")
+        save_config(c)
+    log.warning("Proxy auto-switched to exit #%s (%s)", nxt, match.get("name"))
+
+
+def _start_proxy_autoswitch(interval_seconds: int = 300) -> threading.Thread:
+    """When auto_switch is on and the managed tunnel is dead for two checks in
+    a row, rotate to the next exit."""
+    def loop():
+        time.sleep(180)
+        fails = 0
+        while True:
+            try:
+                p = load_config().get("proxy") or {}
+                if p.get("managed") and p.get("auto_switch") and SUB_CACHE_PATH.exists():
+                    if proxy_manager.current_exit_ip() is None:
+                        fails += 1
+                        if fails >= 2:
+                            _rotate_proxy_exit()
+                            fails = 0
+                    else:
+                        fails = 0
+                else:
+                    fails = 0
+            except Exception:
+                log.exception("proxy auto-switch crashed (will retry)")
+            time.sleep(interval_seconds)
+
+    t = threading.Thread(target=loop, daemon=True, name="proxy-autoswitch")
+    t.start()
+    return t
+
+
+_start_proxy_autoswitch()
+
+
 @app.route("/api/proxy/test", methods=["POST"])
 def api_proxy_test():
     """Check the proxy works by fetching our public IP through it. Body may
@@ -768,6 +944,79 @@ def api_proxy_test():
         out["ok"] = False
         out["error"] = str(exc)
     return jsonify(out)
+
+
+# --- Managed Xray: subscription → pick country → apply ---
+
+@app.route("/api/proxy/subscription", methods=["POST"])
+def api_proxy_subscription():
+    """Fetch + parse a subscription URL into a list of exits. Caches the decoded
+    body on the Pi (gitignored) and stores the URL in config."""
+    payload = request.get_json(force=True, silent=True) or {}
+    url = (payload.get("url") or "").strip()
+    if not url:
+        url = ((load_config().get("proxy") or {}).get("subscription_url") or "").strip()
+    if not url:
+        return jsonify({"error": "Не задана ссылка-подписка"}), 400
+    try:
+        decoded = proxy_manager.fetch_subscription(url)
+    except Exception as exc:
+        return jsonify({"error": f"Не удалось получить подписку: {exc}"}), 502
+    SUB_CACHE_PATH.write_text(decoded, encoding="utf-8")
+    exits = proxy_manager.public_exits(proxy_manager.parse_exits(decoded))
+    with _cfg_lock:
+        cfg = load_config()
+        cfg["proxy"] = {**PROXY_DEFAULTS, **(cfg.get("proxy") or {}), "subscription_url": url}
+        save_config(cfg)
+    return jsonify({"ok": True, "count": len(exits), "exits": exits})
+
+
+@app.route("/api/proxy/exits", methods=["GET"])
+def api_proxy_exits():
+    """Cached exit list + which one is selected."""
+    p = load_config().get("proxy") or {}
+    exits = []
+    if SUB_CACHE_PATH.exists():
+        exits = proxy_manager.public_exits(proxy_manager.parse_exits(
+            SUB_CACHE_PATH.read_text(encoding="utf-8")))
+    return jsonify({
+        "exits": exits,
+        "selected": p.get("exit_index"),
+        "selected_name": p.get("exit_name") or "",
+        "managed": bool(p.get("managed")),
+        "auto_switch": bool(p.get("auto_switch")),
+        "has_subscription": bool(p.get("subscription_url")),
+    })
+
+
+@app.route("/api/proxy/select", methods=["POST"])
+def api_proxy_select():
+    """Apply the chosen exit: rewrite the Xray config and restart it."""
+    payload = request.get_json(force=True, silent=True) or {}
+    try:
+        index = int(payload.get("index"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "Не указан индекс выхода"}), 400
+    if not SUB_CACHE_PATH.exists():
+        return jsonify({"error": "Сначала загрузи подписку"}), 400
+    full = proxy_manager.parse_exits(SUB_CACHE_PATH.read_text(encoding="utf-8"))
+    match = next((e for e in full if e["index"] == index), None)
+    if not match:
+        return jsonify({"error": "Выход не найден"}), 404
+    try:
+        proxy_manager.apply_exit(match["uri"])
+    except Exception as exc:
+        log.exception("apply_exit failed")
+        return jsonify({"error": str(exc)}), 500
+    with _cfg_lock:
+        cfg = load_config()
+        cfg["proxy"] = {**PROXY_DEFAULTS, **(cfg.get("proxy") or {})}
+        cfg["proxy"].update(url=proxy_manager.PROXY_URL, managed=True,
+                            exit_index=index, exit_name=match.get("name") or "")
+        _propagate_proxy(cfg)
+        save_config(cfg)
+    _apply_weather_proxy(cfg)
+    return jsonify({"ok": True, "exit_name": match.get("name"), "exit_ip": proxy_manager.current_exit_ip()})
 
 
 @app.route("/api/fields", methods=["GET"])
@@ -1406,6 +1655,64 @@ def api_airtime():
 @app.route("/api/health", methods=["GET"])
 def api_health():
     return jsonify({"ok": True, "time": datetime.utcnow().isoformat() + "Z"})
+
+
+# Cache the proxy exit-IP probe so the health page stays snappy.
+_PROXY_EXIT_CACHE: dict[str, Any] = {"ts": 0.0, "ip": None, "via": False}
+
+
+def _proxy_exit_ip(cfg: dict[str, Any]) -> dict[str, Any]:
+    now = time.time()
+    if now - _PROXY_EXIT_CACHE["ts"] < 60:
+        return _PROXY_EXIT_CACHE
+    proxies = _proxies_dict(_proxy_for(cfg, "weather"))
+    try:
+        r = requests.get("https://api.ipify.org?format=json", timeout=6, proxies=proxies)
+        r.raise_for_status()
+        _PROXY_EXIT_CACHE.update(ts=now, ip=(r.json() or {}).get("ip"), via=bool(proxies))
+    except Exception:
+        _PROXY_EXIT_CACHE.update(ts=now, ip=None, via=bool(proxies))
+    return _PROXY_EXIT_CACHE
+
+
+def _service_active(name: str) -> str:
+    try:
+        r = subprocess.run(["systemctl", "is-active", name],
+                           capture_output=True, text=True, timeout=5)
+        return (r.stdout or r.stderr or "unknown").strip()
+    except Exception:
+        return "unknown"
+
+
+@app.route("/api/health/full", methods=["GET"])
+def api_health_full():
+    """One-shot self-diagnostics for the health card."""
+    cfg = load_config()
+    mesh = BRIDGE.status()
+    exit_info = _proxy_exit_ip(cfg)
+    try:
+        du = shutil.disk_usage(str(BASE_DIR))
+        disk = {
+            "free_gb": round(du.free / 1e9, 1),
+            "total_gb": round(du.total / 1e9, 1),
+            "used_pct": round(100 * (du.total - du.free) / du.total) if du.total else None,
+        }
+    except Exception:
+        disk = {"free_gb": None, "total_gb": None, "used_pct": None}
+    return jsonify({
+        "version": VERSION,
+        "uptime_seconds": int(time.time() - commands.BOT_START_TS),
+        "mesh_connected": bool(mesh.get("connected")),
+        "nodes_known": mesh.get("nodes_known"),
+        "nodes_online_2h": mesh.get("nodes_online_2h"),
+        "weather_last_ok_ts": weather.last_success_ts() or None,
+        "location_set": (cfg.get("location") or {}).get("latitude") is not None,
+        "proxy_url": _proxy_for(cfg, "weather") or "",
+        "proxy_exit_ip": exit_info.get("ip"),
+        "proxy_via": exit_info.get("via"),
+        "xray_active": _service_active("xray"),
+        "disk": disk,
+    })
 
 
 # ---------------------------------------------------------------------------

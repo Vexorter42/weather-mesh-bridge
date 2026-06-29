@@ -13,6 +13,14 @@ import requests
 
 log = logging.getLogger(__name__)
 
+# Unix ts of the last successful real Open-Meteo fetch — surfaced on the health
+# page so the user can tell at a glance whether weather is actually flowing.
+_LAST_SUCCESS_TS: float = 0.0
+
+
+def last_success_ts() -> int:
+    return int(_LAST_SUCCESS_TS)
+
 
 def _ttl_cache(ttl_seconds: int):
     """Memoise a function's successful (non-None) result per-args for ttl_seconds.
@@ -40,6 +48,8 @@ def _ttl_cache(ttl_seconds: int):
                     return hit[1]
                 raise
             if val is not None:
+                global _LAST_SUCCESS_TS
+                _LAST_SUCCESS_TS = now
                 store[key] = (now, val)
                 if len(store) > 64:
                     for k in [k for k, v in store.items() if now - v[0] > ttl_seconds]:

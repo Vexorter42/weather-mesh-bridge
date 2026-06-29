@@ -463,6 +463,36 @@
 
     <!-- =================== MISC TAB =================== -->
     <div class="tab-panel" data-tab="misc">
+      <section class="card" id="healthCard">
+        <h2>🩺 Состояние системы</h2>
+        <p class="hint">Сводка «всё ли живо»: нода, погода, прокси, диск. Обновляется при открытии вкладки.</p>
+        <div class="health-grid" id="healthGrid">
+          <div class="muted">Загружаю…</div>
+        </div>
+        <div class="row" style="margin-top: 10px;">
+          <button id="healthRefresh" class="ghost">↻ Обновить</button>
+        </div>
+      </section>
+
+      <section class="card" id="backupCard">
+        <h2>💾 Бэкап настроек</h2>
+        <p class="hint">
+          Скачай бэкап перед переездом/обновлением — внутри <code>config.json</code> (ключи, прокси, Telegram),
+          пресеты и состояние алертов. Восстановление перезапишет настройки и перезапустит сервис.
+          Авто-бэкап делается раз в сутки (хранятся 14 последних на малине, папка <code>backups/</code>).
+        </p>
+        <label class="toggle-row">
+          <input type="checkbox" id="backupDbs">
+          <span>Включить базы данных (чат + история телеметрии) — архив крупнее</span>
+        </label>
+        <div class="row">
+          <button id="backupDownload" class="primary">⬇️ Скачать бэкап</button>
+          <button id="backupRestoreBtn" class="ghost">⬆️ Восстановить из файла</button>
+          <input type="file" id="backupFile" accept=".zip" hidden>
+        </div>
+        <div id="backupResult" class="tg-test-result" hidden></div>
+      </section>
+
       <section class="card">
         <h2>🧪 Экспериментальное</h2>
         <p class="hint">
@@ -916,7 +946,27 @@
           Полезно, если провайдер режет Open-Meteo, RainViewer, t.me или LLM-API.
         </p>
 
-        <div class="profile-section">Адрес прокси</div>
+        <div class="profile-section">VLESS-подписка (Xray) <small>— выбор страны без SSH</small></div>
+        <p class="hint">
+          Вставь ссылку-подписку — бот сам поднимет локальный туннель
+          (<code>socks5://127.0.0.1:10808</code>) и даст выбрать страну-выход.
+          Ссылка хранится только на малине, в git не попадает.
+        </p>
+        <div class="row">
+          <input type="password" id="proxySubUrl" placeholder="https://…/подписка" style="flex: 1;" autocomplete="off">
+          <button id="proxySubLoad" class="ghost">📥 Загрузить выходы</button>
+        </div>
+        <div class="row" style="margin-top: 8px;">
+          <select id="proxyExitSelect" style="flex: 1;"><option value="">— сначала загрузи подписку —</option></select>
+          <button id="proxyExitApply" class="primary">🌍 Переключить</button>
+        </div>
+        <label class="toggle-row">
+          <input type="checkbox" id="proxyAutoSwitch">
+          <span><strong>Авто-переключение</strong> — если текущий выход отвалится, бот сам перейдёт на следующий</span>
+        </label>
+        <div id="proxyMgrResult" class="tg-test-result" hidden></div>
+
+        <div class="profile-section">Адрес прокси <small>(заполняется автоматически при выборе выхода)</small></div>
         <p class="hint">
           Формат URL. Примеры:<br>
           <code>socks5://127.0.0.1:10808</code> — локальный SOCKS5 (Xray/VLESS, <code>ssh -D</code>)<br>
