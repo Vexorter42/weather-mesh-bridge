@@ -489,6 +489,33 @@ main {
 }
 .hidden { display: none !important; }
 
+/* ---------- Collapsible cards (Settings / Прочее) ---------- */
+.card > h2.card-toggle { cursor: pointer; user-select: none; }
+.card-chev {
+  margin-left: auto;
+  font-size: 0.82em;
+  opacity: 0.5;
+  transition: transform var(--transition);
+}
+.card:not(.collapsed) > .card-toggle .card-chev { transform: rotate(90deg); }
+.card.collapsed > .card-body { display: none; }
+.card.collapsed > h2.card-toggle { margin-bottom: 0; }
+.card.collapsed { padding-bottom: 16px; }
+
+/* ---------- Two-column layout on wide screens for form-heavy tabs ---------- */
+@media (min-width: 1100px) {
+  .tab-panel[data-tab="settings"], .tab-panel[data-tab="misc"] { max-width: 1240px; }
+  .tab-panel[data-tab="settings"].active,
+  .tab-panel[data-tab="misc"].active {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    align-items: start;
+    gap: 18px;
+  }
+  .tab-panel[data-tab="settings"].active > .card-wide,
+  .tab-panel[data-tab="misc"].active > .card-wide { grid-column: 1 / -1; }
+}
+
 /* ---------- Mobile: sidebar becomes a fixed bottom tab-bar ---------- */
 @media (max-width: 860px) {
   .sidebar {

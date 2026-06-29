@@ -132,6 +132,41 @@ function applyTheme(theme) {
   });
 })();
 
+// ---------- Collapsible cards (Settings / Прочее) ----------
+// Wrap each card's body so its header toggles it; remember state per card.
+// Keeps the form-heavy tabs short — open only what you need.
+function enhanceCollapsibleCards() {
+  ["settings", "misc"].forEach((tab) => {
+    document.querySelectorAll(`.tab-panel[data-tab="${tab}"] > .card`).forEach((card, i) => {
+      if (card.dataset.collapsible) return;
+      const h2 = card.querySelector(":scope > h2");
+      if (!h2) return;
+      card.dataset.collapsible = "1";
+      const body = document.createElement("div");
+      body.className = "card-body";
+      let n = h2.nextSibling;
+      while (n) { const next = n.nextSibling; body.appendChild(n); n = next; }
+      card.appendChild(body);
+      h2.classList.add("card-toggle");
+      const chev = document.createElement("span");
+      chev.className = "card-chev";
+      chev.textContent = "▸";
+      chev.setAttribute("aria-hidden", "true");
+      h2.appendChild(chev);
+      const key = "card:" + (card.id || h2.textContent.trim().slice(0, 40));
+      const saved = localStorage.getItem(key);
+      const open = saved === "open" ? true : saved === "closed" ? false : i === 0;
+      card.classList.toggle("collapsed", !open);
+      h2.addEventListener("click", () => {
+        const collapse = !card.classList.contains("collapsed");
+        card.classList.toggle("collapsed", collapse);
+        try { localStorage.setItem(key, collapse ? "closed" : "open"); } catch (e) {}
+      });
+    });
+  });
+}
+enhanceCollapsibleCards();
+
 // ---------- Dashboard ----------
 let KNOWN_NODES = [];     // last fetched node list (for DM picker)
 
