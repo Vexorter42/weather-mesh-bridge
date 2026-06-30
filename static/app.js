@@ -2854,15 +2854,15 @@ async function saveNowcastConfig() {
 async function refreshNowcastStatus() {
   let s;
   try { s = await api("/api/nowcast/status"); }
-  catch (e) { setNcStatus("err", "Ошибка: " + e.message); return; }
+  catch (e) { setNcStatus("err", tf("Ошибка: {0}", e.message)); return; }
   const c = s.config || {};
   const st = s.state || {};
 
   if (c.enabled) {
     const last = st.last_check_ts ? new Date(st.last_check_ts * 1000).toLocaleTimeString() : "—";
-    setNcStatus("ok", `Включён · последняя проверка ${last}`);
+    setNcStatus("ok", tf("Включён · последняя проверка {0}", last));
   } else {
-    setNcStatus("idle", "Выключен");
+    setNcStatus("idle", t("Выключен"));
   }
   // Reflect config into fields only when untouched defaults.
   if ($("#ncEnabled")) $("#ncEnabled").checked = !!c.enabled;
@@ -3091,8 +3091,8 @@ async function testProxy() {
   out.hidden = false;
   out.className = "tg-test-result";
   out.innerHTML = url
-    ? `<span class="muted">⏳ Проверяю выход через прокси…</span>`
-    : `<span class="muted">⏳ Проверяю прямое соединение…</span>`;
+    ? `<span class="muted">${t("⏳ Проверяю выход через прокси…")}</span>`
+    : `<span class="muted">${t("⏳ Проверяю прямое соединение…")}</span>`;
   try {
     const r = await api("/api/proxy/test", { method: "POST", body: { url } });
     const via = r.via_proxy ? "через прокси" : "напрямую";
@@ -3150,14 +3150,14 @@ async function saveLlmConfig() {
 async function refreshLlmStatus() {
   let s;
   try { s = await api("/api/llm/status"); }
-  catch (e) { setLlmStatus("err", "Ошибка: " + e.message); return; }
+  catch (e) { setLlmStatus("err", tf("Ошибка: {0}", e.message)); return; }
 
   if (s.enabled && s.api_key_set) {
-    setLlmStatus("ok", `Включён · модель ${s.model}`);
+    setLlmStatus("ok", tf("Включён · модель {0}", s.model));
   } else if (s.enabled && !s.api_key_set) {
-    setLlmStatus("warn", "Включён, но не задан API-ключ");
+    setLlmStatus("warn", t("Включён, но не задан API-ключ"));
   } else {
-    setLlmStatus("idle", s.api_key_set ? "Выключен (ключ сохранён)" : "Выключен");
+    setLlmStatus("idle", s.api_key_set ? t("Выключен (ключ сохранён)") : t("Выключен"));
   }
   // Reflect config — don't stomp fields the user is editing
   if ($("#llmEnabled")) $("#llmEnabled").checked = !!s.enabled;
@@ -3286,7 +3286,7 @@ async function refreshTgStatusBot() {
   let s;
   try { s = await api("/api/tg-status/status"); }
   catch (e) {
-    setTgsStatus("err", "Ошибка: " + e.message);
+    setTgsStatus("err", tf("Ошибка: {0}", e.message));
     return;
   }
   const c = s.config || {};
@@ -3294,11 +3294,11 @@ async function refreshTgStatusBot() {
   // Status dot/text
   if (s.running) {
     const last = s.last_success_ts ? new Date(s.last_success_ts * 1000).toLocaleTimeString() : "—";
-    setTgsStatus("ok", `Работает · последнее обновление ${last} · всего: ${s.updates_count}`);
+    setTgsStatus("ok", tf("Работает · последнее обновление {0} · всего: {1}", last, s.updates_count));
   } else if (s.last_error) {
-    setTgsStatus("err", "Остановлен · " + s.last_error);
+    setTgsStatus("err", t("Остановлен · ") + s.last_error);
   } else {
-    setTgsStatus("idle", c.bot_token_set && c.chat_id ? "Готов запуститься" : "Заполни bot_token и chat_id");
+    setTgsStatus("idle", c.bot_token_set && c.chat_id ? t("Готов запуститься") : t("Заполни bot_token и chat_id"));
   }
 
   // Reflect the enable toggle from real state (running > persisted enabled)
@@ -3331,21 +3331,21 @@ function wireUpdatePanel() {
 async function refreshUpdateInfo() {
   const txt = $("#updStatusText");
   if (!txt) return;
-  txt.textContent = "Запрашиваю информацию…";
+  txt.textContent = t("Запрашиваю информацию…");
   try {
     const r = await api("/api/system/info");
     if (!r.git_available) {
-      txt.textContent = "Git не найден или это не git-checkout: " + (r.error || "—");
+      txt.textContent = t("Git не найден или это не git-checkout: ") + (r.error || "—");
       return;
     }
     const behind = r.behind_count;
     let s = `${r.branch} · ${r.commit} · «${r.message || ""}»`;
-    if (behind == null) s += " · (не могу проверить upstream)";
-    else if (behind === 0) s += " · ✅ актуальная версия";
-    else s += ` · ⬇️ доступно обновлений: ${behind}`;
+    if (behind == null) s += t(" · (не могу проверить upstream)");
+    else if (behind === 0) s += t(" · ✅ актуальная версия");
+    else s += tf(" · ⬇️ доступно обновлений: {0}", behind);
     txt.textContent = s;
   } catch (e) {
-    txt.textContent = "Ошибка: " + e.message;
+    txt.textContent = tf("Ошибка: {0}", e.message);
   }
 }
 
@@ -3437,9 +3437,9 @@ function updateTgModeUi() {
   if (apiBlock) apiBlock.hidden = (mode !== "telethon");
   if (pollRow) pollRow.style.display = (mode === "web") ? "" : "none";
   if (channelsHint) {
-    channelsHint.innerHTML = mode === "web"
+    channelsHint.innerHTML = t(mode === "web"
       ? `По одному в строке. В режиме «Без API» — только <code>@username</code> публичных каналов.`
-      : `По одному в строке. Можно <code>@username</code> или числовой ID канала (<code>-1001234567890</code>).`;
+      : `По одному в строке. Можно <code>@username</code> или числовой ID канала (<code>-1001234567890</code>).`);
   }
 }
 
@@ -3621,21 +3621,21 @@ async function refreshTelegramStatus() {
   }
   const s = TG_STATE;
   const mode = s.config?.mode || s.mode || "web";
-  const modeLbl = mode === "telethon" ? "API" : "Без API";
+  const modeLbl = mode === "telethon" ? "API" : t("Без API");
 
   // Pretty status dot + text
   if (s.running) {
     const matched = s.matched_count ?? 0;
     const who = mode === "telethon" ? ` · ${s.username || "—"}` : "";
-    setTgStatus("ok", `Работает (${modeLbl})${who} · совпадений: ${matched}`);
+    setTgStatus("ok", tf("Работает ({0}){1} · совпадений: {2}", modeLbl, who, matched));
   } else if (mode === "telethon" && !s.telethon_available) {
-    setTgStatus("err", "Библиотека telethon не установлена. Запусти на Pi: pip install telethon");
+    setTgStatus("err", t("Библиотека telethon не установлена. Запусти на Pi: pip install telethon"));
   } else if (mode === "telethon" && !s.session_exists) {
-    setTgStatus("warn", "Сессия не создана. SSH в Pi и запусти python telegram_setup.py");
+    setTgStatus("warn", t("Сессия не создана. SSH в Pi и запусти python telegram_setup.py"));
   } else if (s.last_error) {
     setTgStatus("err", s.last_error);
   } else {
-    setTgStatus("idle", `Мост остановлен (${modeLbl})`);
+    setTgStatus("idle", tf("Мост остановлен ({0})", modeLbl));
   }
   // Reflect checkbox state to match worker state
   const cb = $("#tgEnabled");

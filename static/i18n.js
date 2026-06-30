@@ -474,6 +474,31 @@
     "онлайн": "online",
     "ок": "ok",
     "через прокси · выход": "via proxy · exit",
+
+    // ---- app.js: interpolated statuses (LLM / status-bot / bridge / update) ----
+    "Выключен": "Disabled",
+    "Включён · последняя проверка {0}": "Enabled · last check {0}",
+    "Включён · модель {0}": "Enabled · model {0}",
+    "Включён, но не задан API-ключ": "Enabled, but no API key set",
+    "Выключен (ключ сохранён)": "Disabled (key saved)",
+    "Работает · последнее обновление {0} · всего: {1}": "Running · last update {0} · total: {1}",
+    "Остановлен · ": "Stopped · ",
+    "Готов запуститься": "Ready to start",
+    "Заполни bot_token и chat_id": "Fill in bot_token and chat_id",
+    "Ошибка: {0}": "Error: {0}",
+    "Работает ({0}){1} · совпадений: {2}": "Running ({0}){1} · matches: {2}",
+    "Библиотека telethon не установлена. Запусти на Pi: pip install telethon": "Telethon library not installed. Run on the Pi: pip install telethon",
+    "Сессия не создана. SSH в Pi и запусти python telegram_setup.py": "Session not created. SSH into the Pi and run python telegram_setup.py",
+    "Мост остановлен ({0})": "Bridge stopped ({0})",
+    "Запрашиваю информацию…": "Requesting info…",
+    "Git не найден или это не git-checkout: ": "Git not found or this isn't a git checkout: ",
+    " · (не могу проверить upstream)": " · (can't check upstream)",
+    " · ✅ актуальная версия": " · ✅ up to date",
+    " · ⬇️ доступно обновлений: {0}": " · ⬇️ updates available: {0}",
+    "⏳ Проверяю выход через прокси…": "⏳ Checking the exit through the proxy…",
+    "⏳ Проверяю прямое соединение…": "⏳ Checking the direct connection…",
+    "По одному в строке. В режиме «Без API» — только <code>@username</code> публичных каналов.": "One per line. In “No API” mode — only <code>@username</code> public channels.",
+    "По одному в строке. Можно <code>@username</code> или числовой ID канала (<code>-1001234567890</code>).": "One per line. Either <code>@username</code> or a numeric channel ID (<code>-1001234567890</code>).",
   };
 
   function norm(s) { return String(s).trim().replace(/\s+/g, " "); }
@@ -484,6 +509,12 @@
   }
   // Exposed for app.js dynamic strings.
   window.t = tr;
+  // Like t() but fills {0},{1},… placeholders: tf("model {0}", name).
+  window.tf = function (s) {
+    let out = tr(s);
+    for (let i = 1; i < arguments.length; i++) out = out.split("{" + (i - 1) + "}").join(arguments[i]);
+    return out;
+  };
   window.__lang = LANG;
 
   const SKIP_TAGS = new Set(["SCRIPT", "STYLE", "CODE", "TEXTAREA", "NOSCRIPT", "OPTION"]);
