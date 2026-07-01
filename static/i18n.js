@@ -499,6 +499,30 @@
     "⏳ Проверяю прямое соединение…": "⏳ Checking the direct connection…",
     "По одному в строке. В режиме «Без API» — только <code>@username</code> публичных каналов.": "One per line. In “No API” mode — only <code>@username</code> public channels.",
     "По одному в строке. Можно <code>@username</code> или числовой ID канала (<code>-1001234567890</code>).": "One per line. Either <code>@username</code> or a numeric channel ID (<code>-1001234567890</code>).",
+
+    // ---- MQTT / Home Assistant ----
+    "MQTT → Home Assistant": "MQTT → Home Assistant",
+    "— публикует погоду, телеметрию нод и алерты в брокер (авто-обнаружение в HA)": "— publishes weather, node telemetry and alerts to the broker (auto-discovered in HA)",
+    "Бот шлёт данные в MQTT-брокер с <strong>Home Assistant Discovery</strong> — в HA сами появятся устройства «Weather Bridge» и по устройству на каждую mesh-ноду (батарея, SNR, онлайн), плюс сенсор последнего алерта. В HA добавь интеграцию <em>MQTT</em> на тот же брокер.": "The bot sends data to the MQTT broker with <strong>Home Assistant Discovery</strong> — a “Weather Bridge” device and one device per mesh node (battery, SNR, online) show up in HA automatically, plus a last-alert sensor. In HA, add the <em>MQTT</em> integration pointing at the same broker.",
+    "Брокер": "Broker",
+    "Хост": "Host",
+    "Логин": "Username",
+    "Пароль <small>(хранится локально в config.json)</small>": "Password",
+    "Пароль": "Password",
+    "Базовый топик": "Base topic",
+    "Интервал публикации, сек": "Publish interval, sec",
+    "Что публиковать": "What to publish",
+    "— температура, ощущение, влажность, ветер, давление, осадки": "— temperature, feels-like, humidity, wind, pressure, precipitation",
+    "Ноды mesh": "Mesh nodes",
+    "— по устройству на ноду: батарея, SNR, онлайн": "— one device per node: battery, SNR, online",
+    "Алерты": "Alerts",
+    "— сенсор с текстом последнего предупреждения (для автоматизаций)": "— a sensor with the last alert text (for automations)",
+    "🔌 Проверить брокер": "🔌 Test broker",
+    "Проверяю брокер…": "Checking the broker…",
+    "Брокер отвечает": "Broker responds",
+    "Подключаюсь…": "Connecting…",
+    "Подключён к {0}:{1} · публикация {2}": "Connected to {0}:{1} · published {2}",
+    "paho-mqtt не установлен на сервере": "paho-mqtt not installed on the server",
   };
 
   function norm(s) { return String(s).trim().replace(/\s+/g, " "); }

@@ -33,6 +33,7 @@ import weather
 import weather_alerts
 import rain_nowcast
 import proxy_manager
+import mqtt_publisher
 from chat_db import ChatDb
 from history_db import HistoryDb
 from meshbridge import MeshBridge
@@ -46,7 +47,7 @@ logging.basicConfig(
 )
 log = logging.getLogger("weather-mesh-bridge")
 
-VERSION = "2.9.0"
+VERSION = "2.10.0"
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "config.json"
@@ -207,6 +208,7 @@ def load_config() -> dict[str, Any]:
             "commands": {"enabled": True, "reply_delay_min_s": 5, "reply_delay_max_s": 10},
             "alerts": dict(weather_alerts.DEFAULTS),
             "nowcast": dict(rain_nowcast.DEFAULTS),
+            "mqtt": dict(mqtt_publisher.DEFAULTS),
             "schedules": [],
             "telegram": dict(TG_DEFAULTS),
             "telegram_status": dict(TGS_DEFAULTS),
@@ -288,6 +290,37 @@ weather_alerts.start_background_worker(load_config, BRIDGE, ALERTS_STATE)
 # Rain nowcast — "дождь идёт к тебе" via Open-Meteo minutely_15.
 NOWCAST_STATE = rain_nowcast.NowcastState(BASE_DIR / "nowcast_state.json")
 rain_nowcast.start_background_worker(load_config, BRIDGE, NOWCAST_STATE)
+
+
+def _mqtt_weather_state() -> Optional[dict[str, Any]]:
+    """Current weather flattened for MQTT/HA (None if no location/fetch fails)."""
+    loc = load_config().get("location") or {}
+    if loc.get("latitude") is None:
+        return None
+    try:
+        data = weather.fetch_weather(loc["latitude"], loc["longitude"], loc.get("timezone") or "auto")
+    except Exception:
+        return None
+    cur = data.get("current") or {}
+    return {
+        "temperature": cur.get("temperature_2m"),
+        "apparent_temperature": cur.get("apparent_temperature"),
+        "humidity": cur.get("relative_humidity_2m"),
+        "wind_speed": cur.get("wind_speed_10m"),
+        "pressure": cur.get("surface_pressure") or cur.get("pressure_msl"),
+        "precipitation": cur.get("precipitation"),
+        "weather_code": cur.get("weather_code"),
+    }
+
+
+def _mqtt_last_alert() -> Optional[dict[str, Any]]:
+    hist = ALERTS_STATE.status().get("history") or []
+    return hist[-1] if hist else None
+
+
+MQTT_PUB = mqtt_publisher.MqttPublisher(
+    load_config, _mqtt_weather_state, BRIDGE.get_known_nodes, _mqtt_last_alert)
+MQTT_PUB.start_worker()
 
 
 def _start_telemetry_collector(interval_seconds: int = 600) -> threading.Thread:
@@ -744,6 +777,8 @@ def api_set_config():
             cfg["alerts"] = {**weather_alerts.DEFAULTS, **(cfg.get("alerts") or {}), **payload["alerts"]}
         if "nowcast" in payload:
             cfg["nowcast"] = {**rain_nowcast.DEFAULTS, **(cfg.get("nowcast") or {}), **payload["nowcast"]}
+        if "mqtt" in payload:
+            cfg["mqtt"] = {**mqtt_publisher.DEFAULTS, **(cfg.get("mqtt") or {}), **payload["mqtt"]}
         if "telegram" in payload:
             cfg["telegram"] = {**TG_DEFAULTS, **(cfg.get("telegram") or {}), **payload["telegram"]}
         if "telegram_status" in payload:
@@ -762,6 +797,7 @@ def api_set_config():
     # Push the freshest telegram config into the bridge. Reconfigure will
     # restart the worker if it's currently running.
     TELEGRAM_BRIDGE.configure(cfg.get("telegram") or {})
+    MQTT_PUB.reconfigure()
     reschedule_all()
     return jsonify(cfg)
 
@@ -1617,6 +1653,19 @@ def api_nowcast_check():
         log.exception("Manual nowcast check failed")
         return jsonify({"error": str(exc)}), 500
     return jsonify({"sent": sent, "ok": True})
+
+
+@app.route("/api/mqtt/status", methods=["GET"])
+def api_mqtt_status():
+    return jsonify(MQTT_PUB.status())
+
+
+@app.route("/api/mqtt/test", methods=["POST"])
+def api_mqtt_test():
+    """Test-connect to the broker with posted (or saved) settings."""
+    payload = request.get_json(force=True, silent=True) or {}
+    section = payload.get("mqtt") if "mqtt" in payload else (load_config().get("mqtt") or {})
+    return jsonify(mqtt_publisher.test_connection(section))
 
 
 @app.route("/api/stats", methods=["GET"])

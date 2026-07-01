@@ -105,6 +105,8 @@ $$(".tab-btn").forEach(btn => {
       refreshTgStatusBot();
       refreshLlmStatus();
       refreshNowcastStatus();
+      loadMqttConfig();
+      refreshMqttStatus();
     } else if (CURRENT_TAB === "proxy") {
       loadProxyConfig();
     }
@@ -2821,6 +2823,7 @@ async function init() {
   wireLlmPanel();
   wireProxyPanel();
   wireNowcastPanel();
+  wireMqttPanel();
 }
 
 // ---------- Радар-нокаст («дождь идёт к тебе») ----------
@@ -2898,6 +2901,100 @@ async function testNowcast() {
 function setNcStatus(kind, text) {
   const dot = $("#ncStatus .tg-dot");
   const txt = $("#ncStatusText");
+  if (dot) dot.className = `tg-dot tg-dot-${kind}`;
+  if (txt) txt.textContent = text;
+}
+
+// ---------- MQTT → Home Assistant ----------
+function wireMqttPanel() {
+  $("#mqttEnabled")?.addEventListener("change", async () => { await saveMqttConfig(); refreshMqttStatus(); });
+  $("#mqttSave")?.addEventListener("click", async () => { await saveMqttConfig(); toast(t("Сохранено"), "ok"); refreshMqttStatus(); });
+  $("#mqttRefresh")?.addEventListener("click", refreshMqttStatus);
+  $("#mqttTest")?.addEventListener("click", testMqtt);
+}
+
+function _mqttFromInputs() {
+  return {
+    enabled:         $("#mqttEnabled").checked,
+    host:            $("#mqttHost").value.trim() || "127.0.0.1",
+    port:            Math.max(1, parseInt($("#mqttPort").value, 10) || 1883),
+    username:        $("#mqttUser").value.trim(),
+    base_topic:      $("#mqttBaseTopic").value.trim() || "weather-mesh",
+    interval_s:      Math.max(10, parseInt($("#mqttInterval").value, 10) || 60),
+    publish_weather: $("#mqttPubWeather").checked,
+    publish_nodes:   $("#mqttPubNodes").checked,
+    publish_alerts:  $("#mqttPubAlerts").checked,
+  };
+}
+
+async function saveMqttConfig() {
+  const mqtt = _mqttFromInputs();
+  const pass = $("#mqttPass").value;   // only send if typed (don't wipe saved)
+  if (pass) mqtt.password = pass;
+  try { await api("/api/config", { method: "POST", body: { mqtt } }); }
+  catch (e) { toast(e.message, "err"); }
+}
+
+async function refreshMqttStatus() {
+  let s;
+  try { s = await api("/api/mqtt/status"); }
+  catch (e) { setMqttStatus("err", t("Ошибка: ") + e.message); return; }
+  if (!s.available) {
+    setMqttStatus("err", "paho-mqtt не установлен на сервере");
+  } else if (!s.enabled) {
+    setMqttStatus("idle", t("Выключен"));
+  } else if (s.connected) {
+    const last = s.last_publish_ts ? relTime(s.last_publish_ts) : "—";
+    setMqttStatus("ok", tf("Подключён к {0}:{1} · публикация {2}", s.host, s.port, last));
+  } else {
+    setMqttStatus("warn", (s.last_error ? t("Ошибка: ") + s.last_error : t("Подключаюсь…")));
+  }
+  if ($("#mqttEnabled")) $("#mqttEnabled").checked = !!s.enabled;
+}
+
+async function testMqtt() {
+  const out = $("#mqttTestResult");
+  out.hidden = false; out.className = "tg-test-result";
+  out.innerHTML = `<span class="muted">⏳ ${t("Проверяю брокер…")}</span>`;
+  try {
+    const mqtt = _mqttFromInputs();
+    const pass = $("#mqttPass").value;
+    if (pass) mqtt.password = pass;
+    const r = await api("/api/mqtt/test", { method: "POST", body: { mqtt } });
+    if (r.ok) {
+      out.className = "tg-test-result ok";
+      out.innerHTML = `✅ <strong>${t("Брокер отвечает")}</strong>`;
+    } else {
+      out.className = "tg-test-result err";
+      out.innerHTML = `❌ ${escapeHtml(r.error || "?")}`;
+    }
+  } catch (e) {
+    out.className = "tg-test-result err";
+    out.innerHTML = `❌ ${escapeHtml(e.message)}`;
+  }
+}
+
+async function loadMqttConfig() {
+  let cfg;
+  try { cfg = await api("/api/config"); }
+  catch { return; }
+  const m = cfg.mqtt || {};
+  const setv = (id, v) => { const el = $(id); if (el && v != null && el.value === el.defaultValue) el.value = v; };
+  if ($("#mqttHost") && !$("#mqttHost").value) $("#mqttHost").value = m.host || "127.0.0.1";
+  if ($("#mqttPort")) $("#mqttPort").value = m.port || 1883;
+  if ($("#mqttUser") && !$("#mqttUser").value) $("#mqttUser").value = m.username || "";
+  if ($("#mqttBaseTopic") && !$("#mqttBaseTopic").value) $("#mqttBaseTopic").value = m.base_topic || "weather-mesh";
+  if ($("#mqttInterval")) $("#mqttInterval").value = m.interval_s || 60;
+  if ($("#mqttPass") && m.password) $("#mqttPass").placeholder = "(сохранён — впиши, чтобы заменить)";
+  if (typeof m.publish_weather === "boolean") $("#mqttPubWeather").checked = m.publish_weather;
+  if (typeof m.publish_nodes === "boolean") $("#mqttPubNodes").checked = m.publish_nodes;
+  if (typeof m.publish_alerts === "boolean") $("#mqttPubAlerts").checked = m.publish_alerts;
+  if (typeof m.enabled === "boolean") $("#mqttEnabled").checked = m.enabled;
+}
+
+function setMqttStatus(kind, text) {
+  const dot = $("#mqttStatus .tg-dot");
+  const txt = $("#mqttStatusText");
   if (dot) dot.className = `tg-dot tg-dot-${kind}`;
   if (txt) txt.textContent = text;
 }

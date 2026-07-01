@@ -9,6 +9,9 @@ cryptography>=42.0.0
 # wants `requests.get(..., proxies={"https": "socks5://..."})`).
 PySocks>=1.7.1
 
+# MQTT publishing to Home Assistant (weather + mesh telemetry + alerts).
+paho-mqtt>=1.6.1
+
 # Optional — only needed for the "С API" / Telethon mode of the Telegram bridge
 # (Прочее → Telegram-мост → режим с api_id). The default "Без API" / web-scrape
 # mode works without it. Uncomment if you want MTProto support:

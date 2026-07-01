@@ -548,6 +548,73 @@
           </div>
         </details>
 
+        <!-- ===== MQTT / Home Assistant ===== -->
+        <details class="experiment" id="experimentMqtt">
+          <summary>
+            <label class="toggle-row" onclick="event.stopPropagation();">
+              <input type="checkbox" id="mqttEnabled">
+              <span><strong>MQTT → Home Assistant</strong> — публикует погоду, телеметрию нод и алерты в брокер (авто-обнаружение в HA)</span>
+            </label>
+          </summary>
+          <div class="experiment-body">
+            <p class="hint">
+              Бот шлёт данные в MQTT-брокер с <strong>Home Assistant Discovery</strong> — в HA сами появятся
+              устройства «Weather Bridge» и по устройству на каждую mesh-ноду (батарея, SNR, онлайн), плюс сенсор последнего алерта.
+              В HA добавь интеграцию <em>MQTT</em> на тот же брокер.
+            </p>
+
+            <div class="tg-status" id="mqttStatus">
+              <span class="tg-dot tg-dot-idle"></span>
+              <span id="mqttStatusText">Загружаю состояние…</span>
+            </div>
+
+            <div class="profile-section">Брокер</div>
+            <div class="grid2">
+              <label>Хост
+                <input type="text" id="mqttHost" placeholder="127.0.0.1">
+              </label>
+              <label>Порт
+                <input type="number" id="mqttPort" min="1" max="65535" value="1883">
+              </label>
+              <label>Логин
+                <input type="text" id="mqttUser" placeholder="mesh" autocomplete="off">
+              </label>
+              <label>Пароль <small>(хранится локально в config.json)</small>
+                <input type="password" id="mqttPass" placeholder="••••••" autocomplete="off">
+              </label>
+            </div>
+            <div class="grid2">
+              <label>Базовый топик
+                <input type="text" id="mqttBaseTopic" placeholder="weather-mesh">
+              </label>
+              <label>Интервал публикации, сек
+                <input type="number" id="mqttInterval" min="10" max="3600" step="10" value="60">
+              </label>
+            </div>
+
+            <div class="profile-section">Что публиковать</div>
+            <label class="toggle-row">
+              <input type="checkbox" id="mqttPubWeather" checked>
+              <span><strong>Погода</strong> — температура, ощущение, влажность, ветер, давление, осадки</span>
+            </label>
+            <label class="toggle-row">
+              <input type="checkbox" id="mqttPubNodes" checked>
+              <span><strong>Ноды mesh</strong> — по устройству на ноду: батарея, SNR, онлайн</span>
+            </label>
+            <label class="toggle-row">
+              <input type="checkbox" id="mqttPubAlerts" checked>
+              <span><strong>Алерты</strong> — сенсор с текстом последнего предупреждения (для автоматизаций)</span>
+            </label>
+
+            <div class="row">
+              <button id="mqttSave">💾 Сохранить</button>
+              <button id="mqttTest" class="ghost">🔌 Проверить брокер</button>
+              <button id="mqttRefresh" class="ghost">↻ Обновить</button>
+            </div>
+            <div id="mqttTestResult" class="tg-test-result" hidden></div>
+          </div>
+        </details>
+
         <!-- ===== LLM / AI assistant ===== -->
         <details class="experiment" id="experimentLlm">
           <summary>
