@@ -268,6 +268,18 @@ html[data-theme="light"] .toast { background: rgba(26, 35, 52, 0.94); }
 .ag-fill.warn { background: linear-gradient(90deg, var(--good), var(--warn)); }
 .ag-fill.danger { background: linear-gradient(90deg, var(--warn), var(--danger)); }
 
+/* ---------- Clickable links inside chat messages ---------- */
+.chat-link {
+  color: #4da3ff;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  word-break: break-all;
+}
+.chat-link:hover { text-decoration: none; }
+/* Outgoing bubbles have an accent background — use a lighter link colour there. */
+.chat-msg.outgoing .chat-link { color: #e8f0ff; }
+html[data-theme="light"] .chat-link { color: #1663c7; }
+
 /* ---------- Health / self-diagnostics ---------- */
 .health-grid { display: flex; flex-direction: column; gap: 2px; margin-top: 8px; }
 .hd-row {

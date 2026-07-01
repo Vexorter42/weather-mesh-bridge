@@ -13,6 +13,16 @@ const escapeHtml = (s) => String(s).replace(/[&<>"']/g, c => ({
   "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
 }[c]));
 
+// Escape text, then turn http(s) URLs into clickable links (opens new tab).
+function linkify(text) {
+  return escapeHtml(text || "").replace(/https?:\/\/[^\s<]+/g, (url) => {
+    let clean = url, tail = "";
+    const m = clean.match(/[.,!?)\]]+$/);   // keep trailing sentence punctuation out of the link
+    if (m) { tail = clean.slice(-m[0].length); clean = clean.slice(0, -m[0].length); }
+    return `<a href="${clean}" target="_blank" rel="noopener noreferrer" class="chat-link">${clean}</a>${tail}`;
+  });
+}
+
 // Russian plural for "hop"
 function pluralHops(n) {
   const a = Math.abs(Math.trunc(n));
@@ -2096,7 +2106,7 @@ function _buildMessageElement(m, byMsgId, elements) {
       actions +
     `</div>` +
     replyHtml +
-    `<div class="text">${escapeHtml(m.text)}</div>` +
+    `<div class="text">${linkify(m.text)}</div>` +
     buildRfMeta(m);
 
   // Apply any reactions that arrived earlier in this batch waiting for parent.
@@ -2255,7 +2265,7 @@ function appendChatMessage(m) {
       actions +
     `</div>` +
     buildReplyQuote(m, log) +
-    `<div class="text">${escapeHtml(m.text)}</div>` +
+    `<div class="text">${linkify(m.text)}</div>` +
     buildRfMeta(m);
   log.appendChild(div);
 
