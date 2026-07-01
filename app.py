@@ -397,10 +397,14 @@ TELEGRAM_BRIDGE = TelegramBridge(
     mesh_send_callback=_telegram_forward,
     summarize_callback=_telegram_summarize,
 )
-# Apply the persisted config now; auto-start if it's enabled and authorised.
+# Apply the persisted config now; auto-start if it's enabled. Telethon is only
+# required for the "С API" (MTProto) mode — the default "web" mode needs nothing,
+# so we must NOT gate the auto-start on TELETHON_AVAILABLE (that bug meant the
+# bridge stayed down after every restart in web mode).
 _tg_cfg_init = CONFIG.get("telegram") or {}
 TELEGRAM_BRIDGE.configure(_tg_cfg_init)
-if _tg_cfg_init.get("enabled") and TELETHON_AVAILABLE:
+if _tg_cfg_init.get("enabled") and (
+        (_tg_cfg_init.get("mode") or "web") != "telethon" or TELETHON_AVAILABLE):
     try:
         r = TELEGRAM_BRIDGE.start()
         if not r.get("ok"):
