@@ -3120,24 +3120,50 @@ async function loadProxyConfig() {
   loadProxyExits();
 }
 
-function _renderExitOptions(exits, selected) {
+let PROXY_EXITS = [];
+let PROXY_SELECTED = null;
+let PROXY_PINGS = {};        // index -> ms (or null)
+
+function _renderExitOptions(exits, selected, pings) {
+  if (exits !== undefined) PROXY_EXITS = exits || [];
+  if (selected !== undefined) PROXY_SELECTED = selected;
+  if (pings !== undefined) PROXY_PINGS = pings || {};
   const sel = $("#proxyExitSelect");
   if (!sel) return;
-  if (!exits || !exits.length) {
-    sel.innerHTML = `<option value="">— сначала загрузи подписку —</option>`;
+  if (!PROXY_EXITS.length) {
+    sel.innerHTML = `<option value="">${t("— сначала загрузи подписку —")}</option>`;
     return;
   }
-  sel.innerHTML = exits.map(e =>
-    `<option value="${e.index}"${e.index === selected ? " selected" : ""}>${escapeHtml(e.name || e.host)}</option>`
-  ).join("");
+  const cur = sel.value;
+  sel.innerHTML = PROXY_EXITS.map(e => {
+    let suffix = "";
+    if (e.index in PROXY_PINGS) {
+      const ms = PROXY_PINGS[e.index];
+      suffix = ms == null ? " · —" : ` · ${ms} ${t("мс")}`;
+    }
+    return `<option value="${e.index}"${e.index === PROXY_SELECTED ? " selected" : ""}>`
+         + `${escapeHtml(e.name || e.host)}${suffix}</option>`;
+  }).join("");
+  if (cur) sel.value = cur;
+}
+
+async function measureProxyPings() {
+  if (!PROXY_EXITS.length) return;
+  try {
+    const r = await api("/api/proxy/ping");
+    const map = {};
+    (r.pings || []).forEach(p => { map[p.index] = p.ms; });
+    _renderExitOptions(undefined, undefined, map);
+  } catch { /* pings are best-effort */ }
 }
 
 async function loadProxyExits() {
   let d;
   try { d = await api("/api/proxy/exits"); }
   catch { return; }
-  _renderExitOptions(d.exits, d.selected);
+  _renderExitOptions(d.exits, d.selected, {});
   if ($("#proxyAutoSwitch")) $("#proxyAutoSwitch").checked = !!d.auto_switch;
+  measureProxyPings();
 }
 
 async function loadProxySubscription() {
@@ -3148,7 +3174,8 @@ async function loadProxySubscription() {
   try {
     const body = url ? { url } : {};
     const r = await api("/api/proxy/subscription", { method: "POST", body });
-    _renderExitOptions(r.exits, null);
+    _renderExitOptions(r.exits, null, {});
+    measureProxyPings();
     out.className = "tg-test-result ok";
     out.innerHTML = `✅ Загружено выходов: <strong>${r.count}</strong>. Выбери страну и нажми «Переключить».`;
     $("#proxySubUrl").value = "";

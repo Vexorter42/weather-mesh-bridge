@@ -1029,6 +1029,16 @@ def api_proxy_exits():
     })
 
 
+@app.route("/api/proxy/ping", methods=["GET"])
+def api_proxy_ping():
+    """TCP latency (ms) from the Pi to every subscription exit."""
+    if not SUB_CACHE_PATH.exists():
+        return jsonify({"pings": []})
+    exits = proxy_manager.public_exits(proxy_manager.parse_exits(
+        SUB_CACHE_PATH.read_text(encoding="utf-8")))
+    return jsonify({"pings": proxy_manager.ping_exits(exits)})
+
+
 @app.route("/api/proxy/select", methods=["POST"])
 def api_proxy_select():
     """Apply the chosen exit: rewrite the Xray config and restart it."""

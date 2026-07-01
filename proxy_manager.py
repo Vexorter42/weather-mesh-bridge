@@ -13,11 +13,13 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import socket
 import subprocess
 import tempfile
 import time
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Optional
 
 log = logging.getLogger(__name__)
@@ -181,5 +183,24 @@ def current_exit_ip(timeout: int = 8, retries: int = 3, delay: float = 1.5) -> O
     return None
 
 
+def _tcp_ping(host: str, port: int, timeout: float = 3.0) -> Optional[int]:
+    """TCP-connect latency to host:port in ms (None if unreachable)."""
+    try:
+        start = time.time()
+        with socket.create_connection((host, int(port)), timeout=timeout):
+            return int((time.time() - start) * 1000)
+    except Exception:
+        return None
+
+
+def ping_exits(exits: list[dict[str, Any]], timeout: float = 3.0) -> list[dict[str, Any]]:
+    """Measure TCP latency to every exit concurrently. exits = public_exits()."""
+    with ThreadPoolExecutor(max_workers=24) as pool:
+        futs = [(e, pool.submit(_tcp_ping, e.get("host"), e.get("port"), timeout))
+                for e in exits if e.get("host") and e.get("port")]
+        return [{"index": e["index"], "ms": fut.result()} for e, fut in futs]
+
+
 __all__ = ["fetch_subscription", "parse_exits", "public_exits", "build_xray_config",
-           "apply_exit", "current_exit_ip", "PROXY_URL", "XRAY_CONFIG_PATH", "SOCKS_PORT"]
+           "apply_exit", "current_exit_ip", "ping_exits", "PROXY_URL",
+           "XRAY_CONFIG_PATH", "SOCKS_PORT"]

@@ -474,6 +474,7 @@
     "онлайн": "online",
     "ок": "ok",
     "через прокси · выход": "via proxy · exit",
+    "мс": "ms",
 
     // ---- app.js: interpolated statuses (LLM / status-bot / bridge / update) ----
     "Выключен": "Disabled",
