@@ -573,6 +573,22 @@ main {
   color: var(--text-soft);
 }
 .er-btn { padding: 2px 9px; font-size: 0.85rem; }
+.er-channel {
+  flex: 1 1 auto;
+  min-width: 0;
+  width: auto;
+  padding: 4px 26px 4px 8px;
+  font-size: 0.76rem;
+  font-family: var(--font-mono);
+  background-position: right 8px center;
+}
+.er-ch {
+  flex: 0 0 auto;
+  border: 1px solid var(--glass-border);
+  border-radius: 4px;
+  padding: 0 4px;
+  color: var(--muted);
+}
 .er-feed {
   flex: 1 1 auto;
   min-height: 0;

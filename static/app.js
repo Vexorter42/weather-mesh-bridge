@@ -199,6 +199,7 @@ async function refreshDashboard() {
     // hourly chart) can't leave the channel/destination dropdowns empty.
     populateDestinationSelectors(KNOWN_NODES);
     populateTgChannelSelect();
+    populateRailChannel();
     rebuildConversations();
     renderConvList();
     renderDashboard(stats, KNOWN_NODES);
@@ -3887,9 +3888,41 @@ function setTgStatus(kind, text) {
 // ---------- Ether rail (persistent broadcast feed on wide screens) ----------
 // Renders straight from ALL_MESSAGES (maintained by pollChat) — no extra
 // network traffic, no duplicate notification sounds.
+
+// Channel picker for rail sends: real channel names when known, 0–7 fallback.
+// Selection is remembered so «куда пишу» is always explicit and stable.
+function populateRailChannel() {
+  const sel = $("#railChannel");
+  if (!sel) return;
+  const prev = sel.value || (() => { try { return localStorage.getItem("railChannel") || "0"; } catch (e) { return "0"; } })();
+  sel.innerHTML = "";
+  const chans = (KNOWN_CHANNELS || []).filter(c => c && c.index != null);
+  if (chans.length) {
+    for (const ch of chans) {
+      const opt = document.createElement("option");
+      opt.value = String(ch.index);
+      opt.textContent = `ch${ch.index}${ch.name ? " · " + ch.name : ""}${ch.role === "primary" ? " ★" : ""}`;
+      sel.appendChild(opt);
+    }
+  } else {
+    for (let i = 0; i < 8; i++) {
+      const opt = document.createElement("option");
+      opt.value = String(i);
+      opt.textContent = `ch${i}`;
+      sel.appendChild(opt);
+    }
+  }
+  if (prev && Array.from(sel.options).some(o => o.value === prev)) sel.value = prev;
+}
+
 (function initEtherRail() {
   const rail = $("#etherRail");
   if (!rail) return;
+
+  populateRailChannel();   // fallback 0–7 until /api/channels arrives
+  $("#railChannel")?.addEventListener("change", (e) => {
+    try { localStorage.setItem("railChannel", e.target.value); } catch (err) {}
+  });
 
   const apply = (on) => {
     document.documentElement.classList.toggle("rail-off", !on);
@@ -3929,6 +3962,7 @@ function setTgStatus(kind, text) {
         .toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
       div.innerHTML =
         `<div class="er-meta"><span class="er-from">${escapeHtml(m.from_name || m.from_id || "?")}</span>` +
+        `<span class="er-ch">ch${m.channel ?? 0}</span>` +
         `<span class="er-time">${time}</span></div>` +
         `<div class="er-text">${linkify(m.text)}</div>`;
       feed.appendChild(div);
@@ -3944,8 +3978,9 @@ function setTgStatus(kind, text) {
     const inp = $("#railInput");
     const text = (inp?.value || "").trim();
     if (!text) return;
+    const channel = parseInt($("#railChannel")?.value, 10) || 0;
     try {
-      await api("/api/chat/send", { method: "POST", body: { text, destination: "broadcast" } });
+      await api("/api/chat/send", { method: "POST", body: { text, destination: "broadcast", channel } });
       inp.value = "";
       pollChat();          // pick the sent message up quickly
       setTimeout(render, 400);

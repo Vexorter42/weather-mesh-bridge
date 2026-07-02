@@ -33,6 +33,7 @@
     "Сообщение в эфир…": "Message to the air…",
     "Загружаю эфир…": "Loading air traffic…",
     "Отправить в broadcast": "Send to broadcast",
+    "Канал для отправки": "Send channel",
     "Светлая / тёмная тема": "Light / dark theme",
     "Переключить тему": "Toggle theme",
     "Переключить язык": "Switch language",
