@@ -47,6 +47,7 @@
       <span class="brand-text">Weather → Mesh</span>
     </div>
     <div class="topbar-right">
+      <button id="railToggle" class="theme-toggle rail-toggle" type="button" title="Панель эфира" aria-label="Панель эфира">📡</button>
       <button id="langToggle" class="theme-toggle lang-toggle" type="button" title="Переключить язык" aria-label="Переключить язык">EN</button>
       <button id="themeToggle" class="theme-toggle" type="button" title="Светлая / тёмная тема" aria-label="Переключить тему">🌙</button>
       <div class="status" id="meshStatus">…</div>
@@ -55,18 +56,17 @@
 
   <div class="app-body">
   <nav class="sidebar" aria-label="Навигация">
-    <button class="tab-btn active" data-tab="home"><span class="nav-icon" aria-hidden="true">📊</span><span class="nav-label">Главная</span></button>
-    <button class="tab-btn" data-tab="map"><span class="nav-icon" aria-hidden="true">🗺</span><span class="nav-label">Карта</span></button>
-    <button class="tab-btn" data-tab="settings"><span class="nav-icon" aria-hidden="true">⚙️</span><span class="nav-label">Настройки</span></button>
+    <button class="tab-btn active" data-tab="home"><span class="nav-icon" aria-hidden="true">📊</span><span class="nav-label">Обзор</span></button>
+    <button class="tab-btn" data-tab="net"><span class="nav-icon" aria-hidden="true">🛰</span><span class="nav-label">Сеть</span></button>
+    <button class="tab-btn" data-tab="weather"><span class="nav-icon" aria-hidden="true">🌦</span><span class="nav-label">Погода</span></button>
     <button class="tab-btn" data-tab="chat"><span class="nav-icon" aria-hidden="true">💬</span><span class="nav-label">Чат</span><span class="badge" id="chatBadge" hidden>0</span></button>
-    <button class="tab-btn" data-tab="misc"><span class="nav-icon" aria-hidden="true">🧪</span><span class="nav-label">Прочее</span></button>
-    <button class="tab-btn" data-tab="proxy"><span class="nav-icon" aria-hidden="true">🌐</span><span class="nav-label">Прокси</span></button>
+    <button class="tab-btn" data-tab="integr"><span class="nav-icon" aria-hidden="true">🔌</span><span class="nav-label">Интеграции</span></button>
+    <button class="tab-btn" data-tab="system"><span class="nav-icon" aria-hidden="true">⚙️</span><span class="nav-label">Система</span></button>
   </nav>
 
   <main>
-    <!-- =================== HOME TAB =================== -->
+    <!-- =================== ОБЗОР =================== -->
     <div class="tab-panel active" data-tab="home">
-      <!-- Hero: network status at a glance -->
       <section class="card dash-hero" id="dashHero">
         <div class="hero-status">
           <span class="hero-dot" aria-hidden="true"></span>
@@ -101,7 +101,7 @@
         </div>
       </section>
 
-      <section class="card">
+      <section class="card cc-hourly">
         <h2>📈 Почасовой прогноз (24ч)</h2>
         <div id="hourlyChart" class="hourly-chart-wrap">
           <div class="muted">Загружаю график…</div>
@@ -109,32 +109,6 @@
         <div class="hourly-legend muted">
           <span class="hl-line"></span> температура °C &nbsp;·&nbsp;
           <span class="hl-bar"></span> вероятность осадков %
-        </div>
-      </section>
-
-      <section class="card">
-        <h2>📈 За последние сутки</h2>
-        <div class="stats-grid">
-          <div class="stat">
-            <div class="stat-label">Отправлено</div>
-            <div class="stat-value good" id="statSent">—</div>
-            <div class="stat-sub">сводок и сообщений</div>
-          </div>
-          <div class="stat">
-            <div class="stat-label">Получено</div>
-            <div class="stat-value" id="statRecv">—</div>
-            <div class="stat-sub">из mesh-сети</div>
-          </div>
-          <div class="stat">
-            <div class="stat-label">Средний RSSI</div>
-            <div class="stat-value" id="statRssi">—</div>
-            <div class="stat-sub">сила сигнала входящих</div>
-          </div>
-          <div class="stat">
-            <div class="stat-label">Средние прыжки</div>
-            <div class="stat-value" id="statHops">—</div>
-            <div class="stat-sub">сколько hops в среднем</div>
-          </div>
         </div>
       </section>
 
@@ -173,6 +147,32 @@
       </section>
 
       <section class="card">
+        <h2>📈 За последние сутки</h2>
+        <div class="stats-grid">
+          <div class="stat">
+            <div class="stat-label">Отправлено</div>
+            <div class="stat-value good" id="statSent">—</div>
+            <div class="stat-sub">сводок и сообщений</div>
+          </div>
+          <div class="stat">
+            <div class="stat-label">Получено</div>
+            <div class="stat-value" id="statRecv">—</div>
+            <div class="stat-sub">из mesh-сети</div>
+          </div>
+          <div class="stat">
+            <div class="stat-label">Средний RSSI</div>
+            <div class="stat-value" id="statRssi">—</div>
+            <div class="stat-sub">сила сигнала входящих</div>
+          </div>
+          <div class="stat">
+            <div class="stat-label">Средние прыжки</div>
+            <div class="stat-value" id="statHops">—</div>
+            <div class="stat-sub">сколько hops в среднем</div>
+          </div>
+        </div>
+      </section>
+
+      <section class="card">
         <h2>🕒 Последняя активность</h2>
         <div class="activity-row">
           <span class="activity-label">↑ Бот отправил:</span>
@@ -183,18 +183,10 @@
           <span class="activity-value" id="statLastIn">—</span>
         </div>
       </section>
-
-      <section class="card">
-        <h2>🛰 Узлы mesh-сети</h2>
-        <p class="hint">Последние известные ноды, в порядке свежести. Кликни узел — откроется его профиль с телеметрией.</p>
-        <div id="nodesList" class="nodes-list">
-          <div class="muted">Загрузка…</div>
-        </div>
-      </section>
     </div>
 
-    <!-- =================== MAP TAB =================== -->
-    <div class="tab-panel" data-tab="map">
+    <!-- =================== СЕТЬ =================== -->
+    <div class="tab-panel" data-tab="net">
       <section class="card">
         <h2>🗺 Карта узлов</h2>
         <p class="hint">
@@ -219,12 +211,18 @@
           </span>
         </div>
       </section>
+
+      <section class="card">
+        <h2>🛰 Узлы mesh-сети</h2>
+        <p class="hint">Последние известные ноды, в порядке свежести. Кликни узел — откроется его профиль с телеметрией.</p>
+        <div id="nodesList" class="nodes-list">
+          <div class="muted">Загрузка…</div>
+        </div>
+      </section>
     </div>
 
-    <!-- =================== SETTINGS TAB =================== -->
-    <div class="tab-panel" data-tab="settings">
-
-      <!-- Location -->
+    <!-- =================== ПОГОДА =================== -->
+    <div class="tab-panel" data-tab="weather">
       <section class="card">
         <h2>📍 Город</h2>
         <p class="hint">Поиск работает по любому языку. Выбери из списка — координаты подставятся автоматически.</p>
@@ -236,7 +234,6 @@
         <div id="currentCity" class="muted"></div>
       </section>
 
-      <!-- Message style -->
       <section class="card">
         <h2>✉️ Стиль сообщения</h2>
         <p class="hint">Применяется и к ручной отправке, и к расписанию.</p>
@@ -265,51 +262,6 @@
         </div>
       </section>
 
-      <!-- Mesh connection -->
-      <section class="card">
-        <h2>📡 Heltec V4 (Meshtastic)</h2>
-        <label>Тип подключения
-          <select id="connectionType">
-            <option value="serial">USB-кабель</option>
-            <option value="tcp">WiFi (TCP)</option>
-          </select>
-        </label>
-
-        <div id="serialFields">
-          <label>Устройство <small>(auto / /dev/ttyUSB0 / /dev/ttyACM0)</small>
-            <input type="text" id="devicePath" placeholder="auto">
-          </label>
-        </div>
-
-        <div id="tcpFields" class="hidden">
-          <p class="hint">Подключи Heltec к WiFi через приложение Meshtastic (Module Config → MQTT/HTTP/WiFi).
-            Узнай IP в том же приложении или на роутере. Порт по умолчанию 4403.</p>
-          <div class="grid2">
-            <label>IP адрес Heltec
-              <input type="text" id="tcpHost" placeholder="192.168.0.50">
-            </label>
-            <label>Порт
-              <input type="number" id="tcpPort" value="4403">
-            </label>
-          </div>
-        </div>
-
-        <label>Канал <small>(индекс канала Meshtastic, обычно 0)</small>
-          <input type="number" id="channelIndex" min="0" max="7" value="0">
-        </label>
-        <label>Пауза между частями длинного сообщения, сек
-          <small>(LoRa-эфир медленный — для длинных сводок ставь 8–15 сек)</small>
-          <input type="number" id="chunkDelay" min="0" max="120" step="1" value="10">
-        </label>
-        <div class="row">
-          <button id="saveMesh">Сохранить</button>
-          <button id="testConnect" class="ghost">Проверить связь</button>
-          <button id="disconnectMesh" class="danger-action">⛔ Отключить</button>
-          <button id="heltecSettingsBtn" class="primary">⚙️ Настройки Heltec</button>
-        </div>
-      </section>
-
-      <!-- Weather alerts -->
       <section class="card">
         <h2>⚠️ Предупреждения о погоде</h2>
         <p class="hint">
@@ -361,7 +313,6 @@
         <div id="alertsHistory" class="alerts-history"></div>
       </section>
 
-      <!-- Schedules -->
       <section class="card">
         <h2>🕒 Расписание</h2>
         <p class="hint">Несколько слотов с собственным набором полей. Например: 08:00 — короткая сводка,
@@ -397,7 +348,6 @@
         </details>
       </section>
 
-      <!-- Manual send -->
       <section class="card">
         <h2>🚀 Отправить сейчас</h2>
         <div class="fields" id="manualFields"></div>
@@ -407,9 +357,55 @@
         </div>
         <pre id="previewBox" class="preview"></pre>
       </section>
+
+        <details class="experiment" id="experimentNowcast">
+          <summary>
+            <label class="toggle-row" onclick="event.stopPropagation();">
+              <input type="checkbox" id="ncEnabled">
+              <span><strong>Радар-нокаст «дождь идёт к тебе»</strong> — заранее предупреждает в mesh о приближающихся осадках</span>
+            </label>
+          </summary>
+          <div class="experiment-body">
+            <p class="hint">
+              Берёт поминутный прогноз осадков Open-Meteo для твоих координат и, если дождь/снег
+              приближается в ближайший час, шлёт короткое сообщение: <code>🌧 Дождь через ~15 мин (умеренный), продлится ~40 мин</code>.
+              Один и тот же подход анонсируется один раз (тихий интервал). Координаты берутся из «Настроек».
+            </p>
+
+            <div class="tg-status" id="ncStatus">
+              <span class="tg-dot tg-dot-idle"></span>
+              <span id="ncStatusText">Загружаю состояние…</span>
+            </div>
+
+            <div class="grid2">
+              <label>Проверять каждые <small>(мин)</small>
+                <input type="number" id="ncInterval" min="2" max="60" step="1" value="10">
+              </label>
+              <label>Смотреть вперёд <small>(мин)</small>
+                <input type="number" id="ncLookahead" min="15" max="180" step="15" value="60">
+              </label>
+              <label>Порог осадков <small>(мм за 15 мин)</small>
+                <input type="number" id="ncMinMm" min="0.1" max="5" step="0.1" value="0.3">
+              </label>
+              <label>Не повторять <small>(мин)</small>
+                <input type="number" id="ncQuiet" min="0" max="240" step="10" value="60">
+              </label>
+            </div>
+            <label class="toggle-row">
+              <input type="checkbox" id="ncAlertOngoing" checked>
+              <span>Предупреждать, если дождь <strong>уже идёт</strong> (и сколько ещё продлится)</span>
+            </label>
+
+            <div class="row">
+              <button id="ncSave">💾 Сохранить</button>
+              <button id="ncTest" class="ghost">🌧 Проверить сейчас</button>
+              <button id="ncRefresh" class="ghost">↻ Обновить</button>
+            </div>
+            <div id="ncTestResult" class="tg-test-result" hidden></div>
+          </div>
+        </details>
     </div>
 
-    <!-- =================== CHAT TAB =================== -->
     <div class="tab-panel" data-tab="chat">
       <section class="card chat-card">
         <div class="notif-bar">
@@ -462,340 +458,8 @@
       </section>
     </div>
 
-    <!-- =================== MISC TAB =================== -->
-    <div class="tab-panel" data-tab="misc">
-      <section class="card" id="healthCard">
-        <h2>🩺 Состояние системы</h2>
-        <p class="hint">Сводка «всё ли живо»: нода, погода, прокси, диск. Обновляется при открытии вкладки.</p>
-        <div class="health-grid" id="healthGrid">
-          <div class="muted">Загружаю…</div>
-        </div>
-        <div class="row" style="margin-top: 10px;">
-          <button id="healthRefresh" class="ghost">↻ Обновить</button>
-        </div>
-      </section>
-
-      <section class="card" id="backupCard">
-        <h2>💾 Бэкап настроек</h2>
-        <p class="hint">
-          Скачай бэкап перед переездом/обновлением — внутри <code>config.json</code> (ключи, прокси, Telegram),
-          пресеты и состояние алертов. Восстановление перезапишет настройки и перезапустит сервис.
-          Авто-бэкап делается раз в сутки (хранятся 14 последних на малине, папка <code>backups/</code>).
-        </p>
-        <label class="toggle-row">
-          <input type="checkbox" id="backupDbs">
-          <span>Включить базы данных (чат + история телеметрии) — архив крупнее</span>
-        </label>
-        <div class="row">
-          <button id="backupDownload" class="primary">⬇️ Скачать бэкап</button>
-          <button id="backupRestoreBtn" class="ghost">⬆️ Восстановить из файла</button>
-          <input type="file" id="backupFile" accept=".zip" hidden>
-        </div>
-        <div id="backupResult" class="tg-test-result" hidden></div>
-      </section>
-
-      <section class="card card-wide">
-        <h2>🧪 Экспериментальное</h2>
-        <p class="hint">
-          Фичи в разработке. Включай только то, что понимаешь — оно может ломаться, есть лишние зависимости и т.п.
-        </p>
-
-        <!-- ===== Rain nowcast ===== -->
-        <details class="experiment" id="experimentNowcast">
-          <summary>
-            <label class="toggle-row" onclick="event.stopPropagation();">
-              <input type="checkbox" id="ncEnabled">
-              <span><strong>Радар-нокаст «дождь идёт к тебе»</strong> — заранее предупреждает в mesh о приближающихся осадках</span>
-            </label>
-          </summary>
-          <div class="experiment-body">
-            <p class="hint">
-              Берёт поминутный прогноз осадков Open-Meteo для твоих координат и, если дождь/снег
-              приближается в ближайший час, шлёт короткое сообщение: <code>🌧 Дождь через ~15 мин (умеренный), продлится ~40 мин</code>.
-              Один и тот же подход анонсируется один раз (тихий интервал). Координаты берутся из «Настроек».
-            </p>
-
-            <div class="tg-status" id="ncStatus">
-              <span class="tg-dot tg-dot-idle"></span>
-              <span id="ncStatusText">Загружаю состояние…</span>
-            </div>
-
-            <div class="grid2">
-              <label>Проверять каждые <small>(мин)</small>
-                <input type="number" id="ncInterval" min="2" max="60" step="1" value="10">
-              </label>
-              <label>Смотреть вперёд <small>(мин)</small>
-                <input type="number" id="ncLookahead" min="15" max="180" step="15" value="60">
-              </label>
-              <label>Порог осадков <small>(мм за 15 мин)</small>
-                <input type="number" id="ncMinMm" min="0.1" max="5" step="0.1" value="0.3">
-              </label>
-              <label>Не повторять <small>(мин)</small>
-                <input type="number" id="ncQuiet" min="0" max="240" step="10" value="60">
-              </label>
-            </div>
-            <label class="toggle-row">
-              <input type="checkbox" id="ncAlertOngoing" checked>
-              <span>Предупреждать, если дождь <strong>уже идёт</strong> (и сколько ещё продлится)</span>
-            </label>
-
-            <div class="row">
-              <button id="ncSave">💾 Сохранить</button>
-              <button id="ncTest" class="ghost">🌧 Проверить сейчас</button>
-              <button id="ncRefresh" class="ghost">↻ Обновить</button>
-            </div>
-            <div id="ncTestResult" class="tg-test-result" hidden></div>
-          </div>
-        </details>
-
-        <!-- ===== MQTT / Home Assistant ===== -->
-        <details class="experiment" id="experimentMqtt">
-          <summary>
-            <label class="toggle-row" onclick="event.stopPropagation();">
-              <input type="checkbox" id="mqttEnabled">
-              <span><strong>MQTT → Home Assistant</strong> — публикует погоду, телеметрию нод и алерты в брокер (авто-обнаружение в HA)</span>
-            </label>
-          </summary>
-          <div class="experiment-body">
-            <p class="hint">
-              Бот шлёт данные в MQTT-брокер с <strong>Home Assistant Discovery</strong> — в HA сами появятся
-              устройства «Weather Bridge» и по устройству на каждую mesh-ноду (батарея, SNR, онлайн), плюс сенсор последнего алерта.
-              В HA добавь интеграцию <em>MQTT</em> на тот же брокер.
-            </p>
-
-            <div class="tg-status" id="mqttStatus">
-              <span class="tg-dot tg-dot-idle"></span>
-              <span id="mqttStatusText">Загружаю состояние…</span>
-            </div>
-
-            <div class="profile-section">Брокер</div>
-            <div class="grid2">
-              <label>Хост
-                <input type="text" id="mqttHost" placeholder="127.0.0.1">
-              </label>
-              <label>Порт
-                <input type="number" id="mqttPort" min="1" max="65535" value="1883">
-              </label>
-              <label>Логин
-                <input type="text" id="mqttUser" placeholder="mesh" autocomplete="off">
-              </label>
-              <label>Пароль <small>(хранится локально в config.json)</small>
-                <input type="password" id="mqttPass" placeholder="••••••" autocomplete="off">
-              </label>
-            </div>
-            <div class="grid2">
-              <label>Базовый топик
-                <input type="text" id="mqttBaseTopic" placeholder="weather-mesh">
-              </label>
-              <label>Интервал публикации, сек
-                <input type="number" id="mqttInterval" min="10" max="3600" step="10" value="60">
-              </label>
-            </div>
-
-            <div class="profile-section">Что публиковать</div>
-            <label class="toggle-row">
-              <input type="checkbox" id="mqttPubWeather" checked>
-              <span><strong>Погода</strong> — температура, ощущение, влажность, ветер, давление, осадки</span>
-            </label>
-            <label class="toggle-row">
-              <input type="checkbox" id="mqttPubNodes" checked>
-              <span><strong>Ноды mesh</strong> — по устройству на ноду: батарея, SNR, онлайн</span>
-            </label>
-            <label class="toggle-row">
-              <input type="checkbox" id="mqttPubAlerts" checked>
-              <span><strong>Алерты</strong> — сенсор с текстом последнего предупреждения (для автоматизаций)</span>
-            </label>
-
-            <div class="row">
-              <button id="mqttSave">💾 Сохранить</button>
-              <button id="mqttTest" class="ghost">🔌 Проверить брокер</button>
-              <button id="mqttRefresh" class="ghost">↻ Обновить</button>
-            </div>
-            <div id="mqttTestResult" class="tg-test-result" hidden></div>
-          </div>
-        </details>
-
-        <!-- ===== LLM / AI assistant ===== -->
-        <details class="experiment" id="experimentLlm">
-          <summary>
-            <label class="toggle-row" onclick="event.stopPropagation();">
-              <input type="checkbox" id="llmEnabled">
-              <span><strong>ИИ-ассистент</strong> — команда <code>/ai &lt;вопрос&gt;</code> в чате (OpenAI-совместимый API)</span>
-            </label>
-          </summary>
-          <div class="experiment-body">
-            <p class="hint">
-              Любой в mesh-сети пишет <code>/ai &lt;вопрос&gt;</code> — бот спрашивает LLM и шлёт краткий ответ в эфир.
-              Работает с любым OpenAI-совместимым API: NVIDIA build, OpenAI, OpenRouter, локальный Ollama и т.п.
-            </p>
-
-            <div class="tg-status" id="llmStatus">
-              <span class="tg-dot tg-dot-idle"></span>
-              <span id="llmStatusText">Загружаю состояние…</span>
-            </div>
-
-            <div class="profile-section">Подключение</div>
-            <p class="hint">
-              <strong>OpenRouter:</strong> <a href="https://openrouter.ai/keys" target="_blank" rel="noopener">openrouter.ai/keys</a> → ключ вида <code>sk-or-v1-…</code>,
-              Base URL <code>https://openrouter.ai/api/v1</code>, модель <code>moonshotai/kimi-k2</code> (без «размышлений» — отвечает сразу).<br>
-              💡 <code>kimi-k2.6</code> — reasoning-модель: думает долго, нужен <code>max_tokens</code> ≥ 1500. Для эфира лучше <code>kimi-k2</code>.
-            </p>
-            <label>API ключ <small>(хранится локально в config.json, не в git)</small>
-              <input type="password" id="llmApiKey" placeholder="sk-or-v1-… / sk-… / nvapi-…" autocomplete="off">
-            </label>
-            <div class="grid2">
-              <label>Base URL
-                <input type="text" id="llmBaseUrl" placeholder="https://openrouter.ai/api/v1">
-              </label>
-              <label>Модель
-                <input type="text" id="llmModel" placeholder="moonshotai/kimi-k2">
-              </label>
-            </div>
-            <label>Запасные модели <small>(через запятую — пробуются по очереди, если основная упала/пустая)</small>
-              <input type="text" id="llmFallback" placeholder="google/gemini-2.5-flash, openai/gpt-4.1-mini">
-            </label>
-            <p class="hint">
-              🌐 Прокси для LLM-API настраивается во вкладке <strong>Прокси</strong>
-              (тумблер «LLM»).
-            </p>
-
-            <div class="profile-section">Поведение</div>
-            <label>System-промпт <small>(инструкция модели — держи ответы короткими для LoRa!)</small>
-              <textarea id="llmSystemPrompt" rows="3" class="tg-textarea"></textarea>
-            </label>
-            <div class="grid2">
-              <label>Макс. токенов ответа
-                <input type="number" id="llmMaxTokens" min="16" max="2000" step="16" value="200">
-              </label>
-              <label>Макс. символов в mesh <small>(жёсткий обрез)</small>
-                <input type="number" id="llmMaxChars" min="50" max="2000" step="50" value="600">
-              </label>
-              <label>Temperature <small>(0 — строго, 1 — креативно)</small>
-                <input type="number" id="llmTemp" min="0" max="2" step="0.1" value="0.6">
-              </label>
-            </div>
-            <label class="toggle-row">
-              <input type="checkbox" id="llmContextMemory" checked>
-              <span><strong>Помнить контекст диалога</strong> — бот держит последние реплики каждого узла (30 мин), чтобы понимать уточняющие вопросы по <code>/ai</code></span>
-            </label>
-
-            <div class="row">
-              <button id="llmSave">💾 Сохранить</button>
-              <button id="llmTest" class="ghost">🔍 Проверить связь</button>
-            </div>
-            <div id="llmTestResult" class="tg-test-result" hidden></div>
-
-            <div class="profile-section">Пробный вопрос <small>(только в браузере, не в эфир)</small></div>
-            <div class="row">
-              <input type="text" id="llmAskInput" placeholder="Спроси что-нибудь…" style="flex: 1;">
-              <button id="llmAskBtn" class="primary">Спросить</button>
-            </div>
-            <div id="llmAskResult" class="llm-ask-result" hidden></div>
-          </div>
-        </details>
-
-        <!-- ===== Auto-update ===== -->
-        <details class="experiment" id="experimentUpdate">
-          <summary>
-            <span><strong>🔄 Обновление из git</strong> — подтянуть свежий код с GitHub</span>
-          </summary>
-          <div class="experiment-body">
-            <p class="hint">
-              Тянет последнюю версию бота из git-репозитория. Если изменился <code>requirements.txt</code> — переустанавливает зависимости.
-              Опционально перезапускает сам сервис (нужен systemd с <code>Restart=on-failure</code> или <code>always</code>).
-            </p>
-            <div class="tg-status" id="updStatus">
-              <span class="tg-dot tg-dot-idle"></span>
-              <span id="updStatusText">Загружаю инфо…</span>
-            </div>
-            <div class="row">
-              <button id="updRefresh" class="ghost">↻ Проверить обновления</button>
-              <button id="updPull" class="primary">📥 Обновить</button>
-              <label class="toggle-row" style="margin-left: auto;">
-                <input type="checkbox" id="updRestart" checked>
-                <span>Перезапустить сервис после обновления</span>
-              </label>
-            </div>
-            <pre id="updLog" class="preview" style="margin-top: 12px; max-height: 240px; overflow-y: auto;"></pre>
-          </div>
-        </details>
-
-        <!-- ===== Telegram status-bot (pinned message) ===== -->
-        <details class="experiment" id="experimentTgStatus">
-          <summary>
-            <label class="toggle-row" onclick="event.stopPropagation();">
-              <input type="checkbox" id="tgsEnabled">
-              <span><strong>Статус-бот в Telegram-чате</strong> — редактирует закреплённое сообщение с погодой и онлайн-статусом</span>
-            </label>
-          </summary>
-          <div class="experiment-body">
-            <p class="hint">
-              Бот живёт в указанном чате и каждые N секунд переписывает заранее закреплённое сообщение свежими данными:
-              онлайн-статусом, текущей погодой, статистикой mesh. Когда бот падает — сообщение остаётся со старым временем,
-              а по желанию systemd-хук помечает его как <code>🔴 OFFLINE</code>.
-            </p>
-
-            <div class="tg-status" id="tgsStatus">
-              <span class="tg-dot tg-dot-idle"></span>
-              <span id="tgsStatusText">Загружаю состояние…</span>
-            </div>
-
-            <div class="profile-section">Настройка бота (одноразово)</div>
-            <p class="hint">
-              1. Открой <a href="https://t.me/BotFather" target="_blank" rel="noopener">@BotFather</a> → <code>/newbot</code> → скопируй <strong>bot_token</strong>.<br>
-              2. Добавь бота в нужный чат и сделай его <strong>админом</strong> с правом «Pin messages».<br>
-              3. Узнай <strong>chat_id</strong> чата — например через <a href="https://t.me/getmyid_bot" target="_blank" rel="noopener">@getmyid_bot</a> (для группы — переслать туда сообщение и спросить ID), либо <code>-100xxxxxxx</code> для супергрупп.
-            </p>
-            <label>Bot token <small>(вид <code>1234567890:ABC…</code>)</small>
-              <input type="text" id="tgsToken" placeholder="123:ABC…" autocomplete="off">
-            </label>
-            <label>Chat ID <small>(число; для групп обычно отрицательное)</small>
-              <input type="text" id="tgsChatId" placeholder="-1001234567890">
-            </label>
-
-            <div class="profile-section">Параметры обновления</div>
-            <label>Интервал обновления, сек <small>(минимум 15)</small>
-              <input type="number" id="tgsUpdateSec" min="15" max="3600" step="15" value="60">
-            </label>
-            <p class="hint">
-              🌐 Прокси для статус-бота настраивается во вкладке <strong>Прокси</strong>
-              (тумблер «Статус-бот»).
-            </p>
-
-            <label class="toggle-row">
-              <input type="checkbox" id="tgsAutoPin" checked>
-              <span>Автоматически закрепить сообщение при первой отправке (нужно право <code>Pin messages</code>)</span>
-            </label>
-            <label class="toggle-row">
-              <input type="checkbox" id="tgsShowWeather" checked>
-              <span>Показывать погоду (температура, ощущение, влажность, ветер)</span>
-            </label>
-            <label class="toggle-row">
-              <input type="checkbox" id="tgsShowMesh" checked>
-              <span>Показывать статистику mesh-сети (узлы / онлайн)</span>
-            </label>
-
-            <label>Доп. текст внизу <small>(одна-две строки, например подсказка чату)</small>
-              <textarea id="tgsExtra" rows="2" placeholder="Только для ответов с бота. Если вдруг не увидели текст в интерфейсе мештастика." class="tg-textarea"></textarea>
-            </label>
-
-            <div class="row">
-              <button id="tgsSave">💾 Сохранить</button>
-              <button id="tgsStart" class="primary">▶ Запустить бота</button>
-              <button id="tgsStop" class="danger-action">⏹ Остановить</button>
-              <button id="tgsUpdateNow" class="ghost">🔄 Обновить сейчас</button>
-              <button id="tgsReset" class="ghost" title="Забыть закреп — следующее сообщение будет новым">✂ Сбросить закреп</button>
-            </div>
-
-            <p class="hint" style="margin-top: 12px;">
-              📐 <strong>Совет:</strong> сначала создай бота, добавь в чат, нажми «Сохранить» — потом «Запустить».
-              Бот сразу пошлёт сообщение и попробует его закрепить. Если у него нет права закреплять — закрепи руками,
-              <code>message_id</code> бот всё равно запомнит.
-            </p>
-          </div>
-        </details>
-
-        <!-- ===== Telegram bridge ===== -->
+    <!-- =================== ИНТЕГРАЦИИ =================== -->
+    <div class="tab-panel" data-tab="integr">
         <details class="experiment" id="experimentTg">
           <summary>
             <label class="toggle-row" onclick="event.stopPropagation();">
@@ -1001,11 +665,271 @@
             </details>
           </div>
         </details>
-      </section>
+
+        <details class="experiment" id="experimentTgStatus">
+          <summary>
+            <label class="toggle-row" onclick="event.stopPropagation();">
+              <input type="checkbox" id="tgsEnabled">
+              <span><strong>Статус-бот в Telegram-чате</strong> — редактирует закреплённое сообщение с погодой и онлайн-статусом</span>
+            </label>
+          </summary>
+          <div class="experiment-body">
+            <p class="hint">
+              Бот живёт в указанном чате и каждые N секунд переписывает заранее закреплённое сообщение свежими данными:
+              онлайн-статусом, текущей погодой, статистикой mesh. Когда бот падает — сообщение остаётся со старым временем,
+              а по желанию systemd-хук помечает его как <code>🔴 OFFLINE</code>.
+            </p>
+
+            <div class="tg-status" id="tgsStatus">
+              <span class="tg-dot tg-dot-idle"></span>
+              <span id="tgsStatusText">Загружаю состояние…</span>
+            </div>
+
+            <div class="profile-section">Настройка бота (одноразово)</div>
+            <p class="hint">
+              1. Открой <a href="https://t.me/BotFather" target="_blank" rel="noopener">@BotFather</a> → <code>/newbot</code> → скопируй <strong>bot_token</strong>.<br>
+              2. Добавь бота в нужный чат и сделай его <strong>админом</strong> с правом «Pin messages».<br>
+              3. Узнай <strong>chat_id</strong> чата — например через <a href="https://t.me/getmyid_bot" target="_blank" rel="noopener">@getmyid_bot</a> (для группы — переслать туда сообщение и спросить ID), либо <code>-100xxxxxxx</code> для супергрупп.
+            </p>
+            <label>Bot token <small>(вид <code>1234567890:ABC…</code>)</small>
+              <input type="text" id="tgsToken" placeholder="123:ABC…" autocomplete="off">
+            </label>
+            <label>Chat ID <small>(число; для групп обычно отрицательное)</small>
+              <input type="text" id="tgsChatId" placeholder="-1001234567890">
+            </label>
+
+            <div class="profile-section">Параметры обновления</div>
+            <label>Интервал обновления, сек <small>(минимум 15)</small>
+              <input type="number" id="tgsUpdateSec" min="15" max="3600" step="15" value="60">
+            </label>
+            <p class="hint">
+              🌐 Прокси для статус-бота настраивается во вкладке <strong>Прокси</strong>
+              (тумблер «Статус-бот»).
+            </p>
+
+            <label class="toggle-row">
+              <input type="checkbox" id="tgsAutoPin" checked>
+              <span>Автоматически закрепить сообщение при первой отправке (нужно право <code>Pin messages</code>)</span>
+            </label>
+            <label class="toggle-row">
+              <input type="checkbox" id="tgsShowWeather" checked>
+              <span>Показывать погоду (температура, ощущение, влажность, ветер)</span>
+            </label>
+            <label class="toggle-row">
+              <input type="checkbox" id="tgsShowMesh" checked>
+              <span>Показывать статистику mesh-сети (узлы / онлайн)</span>
+            </label>
+
+            <label>Доп. текст внизу <small>(одна-две строки, например подсказка чату)</small>
+              <textarea id="tgsExtra" rows="2" placeholder="Только для ответов с бота. Если вдруг не увидели текст в интерфейсе мештастика." class="tg-textarea"></textarea>
+            </label>
+
+            <div class="row">
+              <button id="tgsSave">💾 Сохранить</button>
+              <button id="tgsStart" class="primary">▶ Запустить бота</button>
+              <button id="tgsStop" class="danger-action">⏹ Остановить</button>
+              <button id="tgsUpdateNow" class="ghost">🔄 Обновить сейчас</button>
+              <button id="tgsReset" class="ghost" title="Забыть закреп — следующее сообщение будет новым">✂ Сбросить закреп</button>
+            </div>
+
+            <p class="hint" style="margin-top: 12px;">
+              📐 <strong>Совет:</strong> сначала создай бота, добавь в чат, нажми «Сохранить» — потом «Запустить».
+              Бот сразу пошлёт сообщение и попробует его закрепить. Если у него нет права закреплять — закрепи руками,
+              <code>message_id</code> бот всё равно запомнит.
+            </p>
+          </div>
+        </details>
+
+        <details class="experiment" id="experimentLlm">
+          <summary>
+            <label class="toggle-row" onclick="event.stopPropagation();">
+              <input type="checkbox" id="llmEnabled">
+              <span><strong>ИИ-ассистент</strong> — команда <code>/ai &lt;вопрос&gt;</code> в чате (OpenAI-совместимый API)</span>
+            </label>
+          </summary>
+          <div class="experiment-body">
+            <p class="hint">
+              Любой в mesh-сети пишет <code>/ai &lt;вопрос&gt;</code> — бот спрашивает LLM и шлёт краткий ответ в эфир.
+              Работает с любым OpenAI-совместимым API: NVIDIA build, OpenAI, OpenRouter, локальный Ollama и т.п.
+            </p>
+
+            <div class="tg-status" id="llmStatus">
+              <span class="tg-dot tg-dot-idle"></span>
+              <span id="llmStatusText">Загружаю состояние…</span>
+            </div>
+
+            <div class="profile-section">Подключение</div>
+            <p class="hint">
+              <strong>OpenRouter:</strong> <a href="https://openrouter.ai/keys" target="_blank" rel="noopener">openrouter.ai/keys</a> → ключ вида <code>sk-or-v1-…</code>,
+              Base URL <code>https://openrouter.ai/api/v1</code>, модель <code>moonshotai/kimi-k2</code> (без «размышлений» — отвечает сразу).<br>
+              💡 <code>kimi-k2.6</code> — reasoning-модель: думает долго, нужен <code>max_tokens</code> ≥ 1500. Для эфира лучше <code>kimi-k2</code>.
+            </p>
+            <label>API ключ <small>(хранится локально в config.json, не в git)</small>
+              <input type="password" id="llmApiKey" placeholder="sk-or-v1-… / sk-… / nvapi-…" autocomplete="off">
+            </label>
+            <div class="grid2">
+              <label>Base URL
+                <input type="text" id="llmBaseUrl" placeholder="https://openrouter.ai/api/v1">
+              </label>
+              <label>Модель
+                <input type="text" id="llmModel" placeholder="moonshotai/kimi-k2">
+              </label>
+            </div>
+            <label>Запасные модели <small>(через запятую — пробуются по очереди, если основная упала/пустая)</small>
+              <input type="text" id="llmFallback" placeholder="google/gemini-2.5-flash, openai/gpt-4.1-mini">
+            </label>
+            <p class="hint">
+              🌐 Прокси для LLM-API настраивается во вкладке <strong>Прокси</strong>
+              (тумблер «LLM»).
+            </p>
+
+            <div class="profile-section">Поведение</div>
+            <label>System-промпт <small>(инструкция модели — держи ответы короткими для LoRa!)</small>
+              <textarea id="llmSystemPrompt" rows="3" class="tg-textarea"></textarea>
+            </label>
+            <div class="grid2">
+              <label>Макс. токенов ответа
+                <input type="number" id="llmMaxTokens" min="16" max="2000" step="16" value="200">
+              </label>
+              <label>Макс. символов в mesh <small>(жёсткий обрез)</small>
+                <input type="number" id="llmMaxChars" min="50" max="2000" step="50" value="600">
+              </label>
+              <label>Temperature <small>(0 — строго, 1 — креативно)</small>
+                <input type="number" id="llmTemp" min="0" max="2" step="0.1" value="0.6">
+              </label>
+            </div>
+            <label class="toggle-row">
+              <input type="checkbox" id="llmContextMemory" checked>
+              <span><strong>Помнить контекст диалога</strong> — бот держит последние реплики каждого узла (30 мин), чтобы понимать уточняющие вопросы по <code>/ai</code></span>
+            </label>
+
+            <div class="row">
+              <button id="llmSave">💾 Сохранить</button>
+              <button id="llmTest" class="ghost">🔍 Проверить связь</button>
+            </div>
+            <div id="llmTestResult" class="tg-test-result" hidden></div>
+
+            <div class="profile-section">Пробный вопрос <small>(только в браузере, не в эфир)</small></div>
+            <div class="row">
+              <input type="text" id="llmAskInput" placeholder="Спроси что-нибудь…" style="flex: 1;">
+              <button id="llmAskBtn" class="primary">Спросить</button>
+            </div>
+            <div id="llmAskResult" class="llm-ask-result" hidden></div>
+          </div>
+        </details>
+
+        <details class="experiment" id="experimentMqtt">
+          <summary>
+            <label class="toggle-row" onclick="event.stopPropagation();">
+              <input type="checkbox" id="mqttEnabled">
+              <span><strong>MQTT → Home Assistant</strong> — публикует погоду, телеметрию нод и алерты в брокер (авто-обнаружение в HA)</span>
+            </label>
+          </summary>
+          <div class="experiment-body">
+            <p class="hint">
+              Бот шлёт данные в MQTT-брокер с <strong>Home Assistant Discovery</strong> — в HA сами появятся
+              устройства «Weather Bridge» и по устройству на каждую mesh-ноду (батарея, SNR, онлайн), плюс сенсор последнего алерта.
+              В HA добавь интеграцию <em>MQTT</em> на тот же брокер.
+            </p>
+
+            <div class="tg-status" id="mqttStatus">
+              <span class="tg-dot tg-dot-idle"></span>
+              <span id="mqttStatusText">Загружаю состояние…</span>
+            </div>
+
+            <div class="profile-section">Брокер</div>
+            <div class="grid2">
+              <label>Хост
+                <input type="text" id="mqttHost" placeholder="127.0.0.1">
+              </label>
+              <label>Порт
+                <input type="number" id="mqttPort" min="1" max="65535" value="1883">
+              </label>
+              <label>Логин
+                <input type="text" id="mqttUser" placeholder="mesh" autocomplete="off">
+              </label>
+              <label>Пароль <small>(хранится локально в config.json)</small>
+                <input type="password" id="mqttPass" placeholder="••••••" autocomplete="off">
+              </label>
+            </div>
+            <div class="grid2">
+              <label>Базовый топик
+                <input type="text" id="mqttBaseTopic" placeholder="weather-mesh">
+              </label>
+              <label>Интервал публикации, сек
+                <input type="number" id="mqttInterval" min="10" max="3600" step="10" value="60">
+              </label>
+            </div>
+
+            <div class="profile-section">Что публиковать</div>
+            <label class="toggle-row">
+              <input type="checkbox" id="mqttPubWeather" checked>
+              <span><strong>Погода</strong> — температура, ощущение, влажность, ветер, давление, осадки</span>
+            </label>
+            <label class="toggle-row">
+              <input type="checkbox" id="mqttPubNodes" checked>
+              <span><strong>Ноды mesh</strong> — по устройству на ноду: батарея, SNR, онлайн</span>
+            </label>
+            <label class="toggle-row">
+              <input type="checkbox" id="mqttPubAlerts" checked>
+              <span><strong>Алерты</strong> — сенсор с текстом последнего предупреждения (для автоматизаций)</span>
+            </label>
+
+            <div class="row">
+              <button id="mqttSave">💾 Сохранить</button>
+              <button id="mqttTest" class="ghost">🔌 Проверить брокер</button>
+              <button id="mqttRefresh" class="ghost">↻ Обновить</button>
+            </div>
+            <div id="mqttTestResult" class="tg-test-result" hidden></div>
+          </div>
+        </details>
     </div>
 
-    <!-- ===================== PROXY ===================== -->
-    <div class="tab-panel" data-tab="proxy">
+    <!-- =================== СИСТЕМА =================== -->
+    <div class="tab-panel" data-tab="system">
+      <section class="card">
+        <h2>📡 Heltec V4 (Meshtastic)</h2>
+        <label>Тип подключения
+          <select id="connectionType">
+            <option value="serial">USB-кабель</option>
+            <option value="tcp">WiFi (TCP)</option>
+          </select>
+        </label>
+
+        <div id="serialFields">
+          <label>Устройство <small>(auto / /dev/ttyUSB0 / /dev/ttyACM0)</small>
+            <input type="text" id="devicePath" placeholder="auto">
+          </label>
+        </div>
+
+        <div id="tcpFields" class="hidden">
+          <p class="hint">Подключи Heltec к WiFi через приложение Meshtastic (Module Config → MQTT/HTTP/WiFi).
+            Узнай IP в том же приложении или на роутере. Порт по умолчанию 4403.</p>
+          <div class="grid2">
+            <label>IP адрес Heltec
+              <input type="text" id="tcpHost" placeholder="192.168.0.50">
+            </label>
+            <label>Порт
+              <input type="number" id="tcpPort" value="4403">
+            </label>
+          </div>
+        </div>
+
+        <label>Канал <small>(индекс канала Meshtastic, обычно 0)</small>
+          <input type="number" id="channelIndex" min="0" max="7" value="0">
+        </label>
+        <label>Пауза между частями длинного сообщения, сек
+          <small>(LoRa-эфир медленный — для длинных сводок ставь 8–15 сек)</small>
+          <input type="number" id="chunkDelay" min="0" max="120" step="1" value="10">
+        </label>
+        <div class="row">
+          <button id="saveMesh">Сохранить</button>
+          <button id="testConnect" class="ghost">Проверить связь</button>
+          <button id="disconnectMesh" class="danger-action">⛔ Отключить</button>
+          <button id="heltecSettingsBtn" class="primary">⚙️ Настройки Heltec</button>
+        </div>
+      </section>
+
       <section class="card">
         <h2>🌐 Прокси</h2>
         <p class="hint">
@@ -1079,8 +1003,76 @@
           сервер кэширует прогноз и отдаёт последнюю удачную выдачу.
         </p>
       </section>
+
+      <section class="card" id="healthCard">
+        <h2>🩺 Состояние системы</h2>
+        <p class="hint">Сводка «всё ли живо»: нода, погода, прокси, диск. Обновляется при открытии вкладки.</p>
+        <div class="health-grid" id="healthGrid">
+          <div class="muted">Загружаю…</div>
+        </div>
+        <div class="row" style="margin-top: 10px;">
+          <button id="healthRefresh" class="ghost">↻ Обновить</button>
+        </div>
+      </section>
+
+      <section class="card" id="backupCard">
+        <h2>💾 Бэкап настроек</h2>
+        <p class="hint">
+          Скачай бэкап перед переездом/обновлением — внутри <code>config.json</code> (ключи, прокси, Telegram),
+          пресеты и состояние алертов. Восстановление перезапишет настройки и перезапустит сервис.
+          Авто-бэкап делается раз в сутки (хранятся 14 последних на малине, папка <code>backups/</code>).
+        </p>
+        <label class="toggle-row">
+          <input type="checkbox" id="backupDbs">
+          <span>Включить базы данных (чат + история телеметрии) — архив крупнее</span>
+        </label>
+        <div class="row">
+          <button id="backupDownload" class="primary">⬇️ Скачать бэкап</button>
+          <button id="backupRestoreBtn" class="ghost">⬆️ Восстановить из файла</button>
+          <input type="file" id="backupFile" accept=".zip" hidden>
+        </div>
+        <div id="backupResult" class="tg-test-result" hidden></div>
+      </section>
+
+        <details class="experiment" id="experimentUpdate">
+          <summary>
+            <span><strong>🔄 Обновление из git</strong> — подтянуть свежий код с GitHub</span>
+          </summary>
+          <div class="experiment-body">
+            <p class="hint">
+              Тянет последнюю версию бота из git-репозитория. Если изменился <code>requirements.txt</code> — переустанавливает зависимости.
+              Опционально перезапускает сам сервис (нужен systemd с <code>Restart=on-failure</code> или <code>always</code>).
+            </p>
+            <div class="tg-status" id="updStatus">
+              <span class="tg-dot tg-dot-idle"></span>
+              <span id="updStatusText">Загружаю инфо…</span>
+            </div>
+            <div class="row">
+              <button id="updRefresh" class="ghost">↻ Проверить обновления</button>
+              <button id="updPull" class="primary">📥 Обновить</button>
+              <label class="toggle-row" style="margin-left: auto;">
+                <input type="checkbox" id="updRestart" checked>
+                <span>Перезапустить сервис после обновления</span>
+              </label>
+            </div>
+            <pre id="updLog" class="preview" style="margin-top: 12px; max-height: 240px; overflow-y: auto;"></pre>
+          </div>
+        </details>
     </div>
   </main>
+
+  <!-- Ether rail: live broadcast feed, visible on wide screens -->
+  <aside id="etherRail" class="ether-rail">
+    <div class="er-head">
+      <span class="er-title">📡 Эфир</span>
+      <button id="railCollapse" class="ghost er-btn" type="button" title="Свернуть панель эфира">✕</button>
+    </div>
+    <div id="railFeed" class="er-feed"><div class="muted">Загружаю эфир…</div></div>
+    <div class="er-compose">
+      <input type="text" id="railInput" placeholder="Сообщение в эфир…" autocomplete="off">
+      <button id="railSend" class="primary" title="Отправить в broadcast">➤</button>
+    </div>
+  </aside>
   </div><!-- /.app-body -->
   </div><!-- /.app-shell -->
 

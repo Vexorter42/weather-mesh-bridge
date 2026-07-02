@@ -106,18 +106,19 @@ $$(".tab-btn").forEach(btn => {
       requestAnimationFrame(() => { log.scrollTop = log.scrollHeight; });
     } else if (CURRENT_TAB === "home") {
       refreshDashboard();
-    } else if (CURRENT_TAB === "map") {
+    } else if (CURRENT_TAB === "net") {
       refreshMap();
-    } else if (CURRENT_TAB === "misc") {
-      refreshHealth();
+    } else if (CURRENT_TAB === "weather") {
+      refreshNowcastStatus();
+    } else if (CURRENT_TAB === "integr") {
       refreshTelegramStatus();
-      refreshUpdateInfo();
       refreshTgStatusBot();
       refreshLlmStatus();
-      refreshNowcastStatus();
       loadMqttConfig();
       refreshMqttStatus();
-    } else if (CURRENT_TAB === "proxy") {
+    } else if (CURRENT_TAB === "system") {
+      refreshHealth();
+      refreshUpdateInfo();
       loadProxyConfig();
     }
   });
@@ -148,7 +149,7 @@ function applyTheme(theme) {
 // Wrap each card's body so its header toggles it; remember state per card.
 // Keeps the form-heavy tabs short — open only what you need.
 function enhanceCollapsibleCards() {
-  ["settings", "misc"].forEach((tab) => {
+  ["weather", "integr", "system", "net"].forEach((tab) => {
     document.querySelectorAll(`.tab-panel[data-tab="${tab}"] > .card`).forEach((card, i) => {
       if (card.dataset.collapsible) return;
       const h2 = card.querySelector(":scope > h2");
@@ -675,7 +676,7 @@ function openNodeProfile(nodeId) {
 
   $("#profileMap").onclick = () => {
     closeNodeProfile();
-    const tabBtn = document.querySelector('.tab-btn[data-tab="map"]');
+    const tabBtn = document.querySelector('.tab-btn[data-tab="net"]');
     if (tabBtn) tabBtn.click();
     if (n.latitude != null && n.longitude != null) {
       setTimeout(() => {
@@ -936,7 +937,7 @@ async function showTraceOnMap(r) {
   if (!r) { toast("Нет данных traceroute для отрисовки", "err"); return; }
   closeNodeProfile();
 
-  const tabBtn = document.querySelector('.tab-btn[data-tab="map"]');
+  const tabBtn = document.querySelector('.tab-btn[data-tab="net"]');
   if (tabBtn) tabBtn.click();
 
   // Make sure we have fresh node positions — without this, _findCoords may
@@ -2821,7 +2822,7 @@ async function init() {
   }, 30000);
   // Auto-refresh the Telegram bridge + status-bot panels while user looks at them
   setInterval(() => {
-    if (CURRENT_TAB === "misc") {
+    if (CURRENT_TAB === "integr") {
       refreshTelegramStatus();
       refreshTgStatusBot();
     }
@@ -3882,3 +3883,74 @@ function setTgStatus(kind, text) {
   if (dot) dot.className = `tg-dot tg-dot-${kind}`;
   if (txt) txt.textContent = text;
 }
+
+// ---------- Ether rail (persistent broadcast feed on wide screens) ----------
+// Renders straight from ALL_MESSAGES (maintained by pollChat) — no extra
+// network traffic, no duplicate notification sounds.
+(function initEtherRail() {
+  const rail = $("#etherRail");
+  if (!rail) return;
+
+  const apply = (on) => {
+    document.documentElement.classList.toggle("rail-off", !on);
+    $("#railToggle")?.classList.toggle("active", on);
+  };
+  let on = true;
+  try { on = localStorage.getItem("etherRail") !== "off"; } catch (e) {}
+  apply(on);
+  const setState = (v) => {
+    try { localStorage.setItem("etherRail", v ? "on" : "off"); } catch (e) {}
+    apply(v);
+  };
+  $("#railToggle")?.addEventListener("click", () =>
+    setState(document.documentElement.classList.contains("rail-off")));
+  $("#railCollapse")?.addEventListener("click", () => setState(false));
+
+  let lastRendered = 0;
+  const isBroadcast = (m) => !m.is_reaction &&
+    (!m.to_id || m.to_id === "broadcast" || m.to_id === "^all");
+
+  function render() {
+    if (rail.offsetParent === null) return;         // hidden (collapsed/narrow)
+    const feed = $("#railFeed");
+    if (!feed) return;
+    let fresh = ALL_MESSAGES.filter(m => isBroadcast(m) && m.id > lastRendered);
+    if (!fresh.length) return;
+    if (lastRendered === 0) {
+      feed.innerHTML = "";
+      fresh = fresh.slice(-40);                     // first paint: newest 40
+      if (fresh.length) lastRendered = 0;           // ids set below
+    }
+    for (const m of fresh) {
+      if (m.id > lastRendered) lastRendered = m.id;
+      const div = document.createElement("div");
+      div.className = "er-item" + (m.incoming ? "" : " out");
+      const time = new Date((m.time || 0) * 1000)
+        .toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+      div.innerHTML =
+        `<div class="er-meta"><span class="er-from">${escapeHtml(m.from_name || m.from_id || "?")}</span>` +
+        `<span class="er-time">${time}</span></div>` +
+        `<div class="er-text">${linkify(m.text)}</div>`;
+      feed.appendChild(div);
+    }
+    while (feed.children.length > 60) feed.removeChild(feed.firstChild);
+    feed.scrollTop = feed.scrollHeight;
+  }
+
+  render();
+  setInterval(render, 3000);
+
+  async function railSend() {
+    const inp = $("#railInput");
+    const text = (inp?.value || "").trim();
+    if (!text) return;
+    try {
+      await api("/api/chat/send", { method: "POST", body: { text, destination: "broadcast" } });
+      inp.value = "";
+      pollChat();          // pick the sent message up quickly
+      setTimeout(render, 400);
+    } catch (e) { toast(e.message, "err"); }
+  }
+  $("#railSend")?.addEventListener("click", railSend);
+  $("#railInput")?.addEventListener("keydown", (e) => { if (e.key === "Enter") railSend(); });
+})();

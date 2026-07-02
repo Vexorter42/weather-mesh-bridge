@@ -17,12 +17,22 @@
   // ru → en. Keys are the trimmed Russian source strings (emoji kept).
   const EN = {
     // ---- nav / header ----
+    "Обзор": "Overview",
+    "Сеть": "Network",
+    "Интеграции": "Integrations",
+    "Система": "System",
     "Главная": "Home",
     "Карта": "Map",
     "Настройки": "Settings",
     "Чат": "Chat",
     "Прочее": "More",
     "Прокси": "Proxy",
+    "📡 Эфир": "📡 On air",
+    "Панель эфира": "Air panel",
+    "Свернуть панель эфира": "Collapse air panel",
+    "Сообщение в эфир…": "Message to the air…",
+    "Загружаю эфир…": "Loading air traffic…",
+    "Отправить в broadcast": "Send to broadcast",
     "Светлая / тёмная тема": "Light / dark theme",
     "Переключить тему": "Toggle theme",
     "Переключить язык": "Switch language",

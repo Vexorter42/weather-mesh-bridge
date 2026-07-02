@@ -518,16 +518,105 @@ main {
 
 /* ---------- Two-column layout on wide screens for form-heavy tabs ---------- */
 @media (min-width: 1100px) {
-  .tab-panel[data-tab="settings"], .tab-panel[data-tab="misc"] { max-width: 1240px; }
-  .tab-panel[data-tab="settings"].active,
-  .tab-panel[data-tab="misc"].active {
+  .tab-panel[data-tab="weather"], .tab-panel[data-tab="integr"],
+  .tab-panel[data-tab="system"] { max-width: 1240px; }
+  .tab-panel[data-tab="weather"].active,
+  .tab-panel[data-tab="integr"].active,
+  .tab-panel[data-tab="system"].active {
     display: grid;
     grid-template-columns: 1fr 1fr;
     align-items: start;
     gap: 18px;
   }
-  .tab-panel[data-tab="settings"].active > .card-wide,
-  .tab-panel[data-tab="misc"].active > .card-wide { grid-column: 1 / -1; }
+  .tab-panel[data-tab="weather"].active > .card-wide,
+  .tab-panel[data-tab="integr"].active > .card-wide,
+  .tab-panel[data-tab="system"].active > .card-wide { grid-column: 1 / -1; }
+}
+/* details.experiment as a direct grid child — gap does the spacing */
+.tab-panel > .experiment { margin-top: 0; }
+
+/* ---------- Command screen (Обзор): dense grid on wide screens ---------- */
+@media (min-width: 1200px) {
+  .tab-panel[data-tab="home"] { max-width: 1420px; }
+  .tab-panel[data-tab="home"].active {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 18px;
+    align-items: start;
+  }
+  .tab-panel[data-tab="home"].active > #dashHero { grid-column: 1 / -1; }
+  .tab-panel[data-tab="home"].active > .cc-hourly { grid-column: span 2; }
+}
+
+/* ---------- Ether rail (persistent broadcast feed) ---------- */
+.ether-rail {
+  flex: 0 0 304px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-left: 1px solid var(--glass-border);
+  background: var(--glass-bg-soft);
+}
+.er-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--glass-border);
+}
+.er-title {
+  font-size: 0.78rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--text-soft);
+}
+.er-btn { padding: 2px 9px; font-size: 0.85rem; }
+.er-feed {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.er-item {
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-border);
+  border-radius: 8px;
+  padding: 6px 9px;
+  font-size: 0.85rem;
+}
+.er-item.out {
+  border-color: var(--accent-3);
+  background: var(--accent-glow);
+}
+.er-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 0.68rem;
+  font-family: var(--font-mono);
+  color: var(--muted);
+  margin-bottom: 2px;
+}
+.er-from { color: var(--accent); font-weight: 700; }
+.er-text { word-break: break-word; line-height: 1.4; }
+.er-compose {
+  display: flex;
+  gap: 8px;
+  padding: 10px 12px;
+  border-top: 1px solid var(--glass-border);
+}
+.er-compose input { flex: 1 1 auto; padding: 8px 10px; }
+.er-compose button { flex: 0 0 auto; padding: 8px 13px; }
+.rail-toggle.active { color: var(--accent); border-color: var(--accent-3); }
+html.rail-off .ether-rail { display: none; }
+@media (max-width: 1279px) {
+  .ether-rail { display: none; }
+  .rail-toggle { display: none; }
 }
 
 /* ---------- Mobile: sidebar becomes a fixed bottom tab-bar ---------- */
