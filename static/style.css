@@ -2700,3 +2700,273 @@ button.run-now:disabled { opacity: 0.5; cursor: wait; }
   }
   body::before { animation: none; }
 }
+
+/* =========================================================================
+   MISSION CONTROL SKIN
+   Appended re-skin layer: keeps every id/class and all layout rules above,
+   swaps the glassmorphism identity (blur, blooms, gradients, big radii) for
+   a dense instrument-panel look — solid panels, hairline borders, blueprint
+   grid backdrop, monospaced readouts, signal-cyan accent.
+   ========================================================================= */
+
+:root {
+  /* solid panel surfaces instead of translucent glass */
+  --glass-bg: #101720;
+  --glass-bg-strong: #141c26;
+  --glass-bg-soft: #0c1218;
+  --glass-border: #22303d;
+  --glass-border-strong: #35485c;
+  --glass-highlight: rgba(255, 255, 255, 0.03);
+  --glass-blur: none;
+
+  --text: #d7e2ec;
+  --text-soft: #aebfce;
+  --muted: #7d92a6;
+  --muted-soft: #5c6e80;
+
+  /* signal cyan */
+  --accent: #45c1ff;
+  --accent-2: #2ea8e8;
+  --accent-3: #17709f;
+  --accent-glow: rgba(69, 193, 255, 0.18);
+
+  --magenta: #c792ea;
+  --teal: #39d0d8;
+  --good: #3ddc84;
+  --good-glow: rgba(61, 220, 132, 0.16);
+  --warn: #ffb454;
+  --warn-glow: rgba(255, 180, 84, 0.16);
+  --danger: #ff5d6c;
+  --danger-glow: rgba(255, 93, 108, 0.16);
+
+  --radius: 8px;
+  --radius-sm: 6px;
+  --radius-lg: 10px;
+
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.35);
+  --shadow-md: 0 3px 10px rgba(0, 0, 0, 0.4);
+  --shadow-lg: 0 10px 28px rgba(0, 0, 0, 0.5);
+  --shadow-glow: 0 0 0 1px var(--glass-border);
+}
+
+/* Backdrop: blueprint grid + vignette instead of colour blooms */
+html { background: #0a0e13; }
+body::before {
+  background:
+    linear-gradient(rgba(122, 160, 197, 0.045) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(122, 160, 197, 0.045) 1px, transparent 1px),
+    radial-gradient(1200px 800px at 50% 0%, rgba(69, 193, 255, 0.05), transparent 70%);
+  background-size: 34px 34px, 34px 34px, 100% 100%;
+}
+
+/* Chrome: solid, hairline-bordered */
+.topbar { background: #0d131a; }
+.sidebar { background: #0c1117; }
+@media (max-width: 860px) {
+  .sidebar { background: rgba(10, 15, 21, 0.96); }
+}
+.brand .brand-text {
+  background: none;
+  -webkit-background-clip: initial;
+  background-clip: initial;
+  -webkit-text-fill-color: currentColor;
+  color: var(--text);
+  text-shadow: none;
+  letter-spacing: 0.01em;
+}
+.theme-toggle { border-radius: var(--radius-sm); }
+.theme-toggle:hover { transform: none; }
+
+/* Nav: active tab = solid accent bar + tinted row, no gradient pill */
+.tab-btn.active {
+  background: rgba(69, 193, 255, 0.08);
+  color: var(--accent);
+}
+.tab-btn.active::before { background: var(--accent); }
+
+/* Panels: flat, top signal strip, technical headers */
+.card {
+  background: var(--glass-bg);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  box-shadow: none;
+}
+.card:hover { transform: none; box-shadow: none; }
+.card::before {
+  height: 2px;
+  background: linear-gradient(90deg, var(--accent) 0%, rgba(69, 193, 255, 0.05) 55%, transparent 100%);
+  opacity: 0.55;
+}
+.card h2 {
+  font-size: 0.8rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--text-soft);
+  border-bottom: 1px solid var(--glass-border);
+  padding-bottom: 9px;
+  margin-bottom: 12px;
+}
+.card.collapsed > h2.card-toggle { border-bottom: none; padding-bottom: 0; }
+
+/* Readouts in mono — instrument style */
+.stat-value, .hm-val, .ag-value, .hd-val, .nc-last, .ww-temp,
+.activity-value, .badge, .node-age {
+  font-family: var(--font-mono);
+}
+.stat-value, .hm-val { color: var(--text); text-shadow: none; }
+.ww-temp { text-shadow: none; }
+
+/* Hero: plain panel, no gradient wash */
+.dash-hero { background: var(--glass-bg); }
+
+/* Buttons: flat, precise */
+button {
+  background: #16202b;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  border-radius: var(--radius-sm);
+  font-size: 0.88rem;
+  letter-spacing: 0.015em;
+}
+button:hover {
+  background: #1b2735;
+  transform: none;
+  box-shadow: none;
+  border-color: var(--accent-3);
+}
+button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #06131c;
+  box-shadow: none;
+}
+button.primary:hover {
+  background: var(--accent-2);
+  border-color: var(--accent-2);
+  box-shadow: none;
+}
+button.ghost { background: transparent; }
+button.ghost:hover { background: #16202b; }
+button.delete:hover, button.danger-action:hover { color: #06131c; background: var(--danger); }
+button.run-now:hover { color: #06131c; background: var(--good); }
+
+/* Inputs: flat wells, thin focus ring */
+input[type="text"], input[type="time"], input[type="number"], select, textarea, .tg-textarea {
+  background: #0b1118;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  border-radius: var(--radius-sm);
+}
+input[type="text"]:focus, input[type="time"]:focus,
+input[type="number"]:focus, select:focus, textarea:focus {
+  background: #0b1118;
+  box-shadow: 0 0 0 2px var(--accent-glow);
+}
+select option { background: #101720; }
+
+/* Chat: incoming = panel, outgoing = solid deep-cyan block */
+.chat-msg {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  box-shadow: none;
+  border-radius: 10px;
+  border-bottom-left-radius: 3px;
+}
+.chat-msg.outgoing {
+  background: #155a80;
+  border-color: rgba(255, 255, 255, 0.14);
+  box-shadow: none;
+  border-bottom-left-radius: 10px;
+  border-bottom-right-radius: 3px;
+}
+.badge {
+  background: var(--accent);
+  color: #06131c;
+}
+
+/* Experiments: flat, solid accent spine when open */
+.experiment {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  background: var(--glass-bg-soft);
+}
+.experiment[open] { box-shadow: none; }
+.experiment[open]::before { background: var(--accent); }
+
+/* Toast: solid panel */
+.toast {
+  background: #141c26;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+/* ---------- Mission Control · light (instrument daylight) ---------- */
+:root[data-theme="light"] {
+  --glass-bg: #ffffff;
+  --glass-bg-strong: #f4f7fa;
+  --glass-bg-soft: #eef2f6;
+  --glass-border: #d3dce4;
+  --glass-border-strong: #aebdcb;
+  --glass-highlight: rgba(255, 255, 255, 0.6);
+  --glass-blur: none;
+
+  --text: #16222d;
+  --text-soft: #3d4f60;
+  --muted: #64798c;
+  --muted-soft: #93a5b5;
+
+  --accent: #0d7fc4;
+  --accent-2: #0a6aa5;
+  --accent-3: #085380;
+  --accent-glow: rgba(13, 127, 196, 0.16);
+
+  --magenta: #9a4fc4;
+  --teal: #0e8f96;
+  --good: #129e58;
+  --good-glow: rgba(18, 158, 88, 0.14);
+  --warn: #c07b12;
+  --warn-glow: rgba(192, 123, 18, 0.14);
+  --danger: #d4404f;
+  --danger-glow: rgba(212, 64, 79, 0.12);
+
+  --shadow-sm: 0 1px 3px rgba(22, 34, 45, 0.08);
+  --shadow-md: 0 3px 10px rgba(22, 34, 45, 0.1);
+  --shadow-lg: 0 10px 28px rgba(22, 34, 45, 0.16);
+  --shadow-glow: 0 0 0 1px var(--glass-border);
+}
+html[data-theme="light"] { background: #e9edf1; }
+html[data-theme="light"] body::before {
+  background:
+    linear-gradient(rgba(60, 90, 120, 0.05) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(60, 90, 120, 0.05) 1px, transparent 1px);
+  background-size: 34px 34px;
+}
+html[data-theme="light"] .topbar { background: #f7fafc; }
+html[data-theme="light"] .sidebar { background: #f2f5f8; }
+@media (max-width: 860px) {
+  html[data-theme="light"] .sidebar { background: rgba(247, 250, 252, 0.97); }
+}
+html[data-theme="light"] .brand .brand-text {
+  background: none;
+  -webkit-text-fill-color: currentColor;
+  color: var(--text);
+}
+html[data-theme="light"] .tab-btn.active { background: rgba(13, 127, 196, 0.09); }
+html[data-theme="light"] button { background: #eef2f6; }
+html[data-theme="light"] button:hover { background: #e4eaf0; }
+html[data-theme="light"] button.primary { background: var(--accent); border-color: var(--accent); color: #ffffff; }
+html[data-theme="light"] button.primary:hover { background: var(--accent-2); }
+html[data-theme="light"] input[type="text"], html[data-theme="light"] input[type="time"],
+html[data-theme="light"] input[type="number"], html[data-theme="light"] select,
+html[data-theme="light"] textarea, html[data-theme="light"] .tg-textarea {
+  background: #ffffff;
+  color: var(--text);
+}
+html[data-theme="light"] input[type="text"]:focus, html[data-theme="light"] input[type="time"]:focus,
+html[data-theme="light"] input[type="number"]:focus, html[data-theme="light"] select:focus,
+html[data-theme="light"] textarea:focus { background: #ffffff; }
+html[data-theme="light"] select option { background: #ffffff; }
+html[data-theme="light"] .chat-msg.outgoing { background: #0d6aa3; }
+html[data-theme="light"] .badge { color: #ffffff; }
+html[data-theme="light"] .toast { background: rgba(26, 35, 52, 0.94); }
