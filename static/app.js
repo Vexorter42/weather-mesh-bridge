@@ -3052,6 +3052,22 @@ $("#backupFile")?.addEventListener("change", async (e) => {
 // ---------- Health / self-diagnostics ----------
 $("#healthRefresh")?.addEventListener("click", refreshHealth);
 
+$("#botRestart")?.addEventListener("click", async () => {
+  if (!confirm(t("Перезагрузить сервис бота? Веб-интерфейс переподключится через ~10 сек."))) return;
+  const out = $("#restartResult");
+  out.hidden = false; out.className = "tg-test-result";
+  out.innerHTML = `<span class="muted">⏳ ${t("Перезагружаю бота…")}</span>`;
+  try {
+    await api("/api/system/restart", { method: "POST" });
+    out.className = "tg-test-result ok";
+    out.innerHTML = `✅ ${t("Сервис перезапускается, страница переподключится…")}`;
+    setTimeout(() => location.reload(), 10000);
+  } catch (e) {
+    out.className = "tg-test-result err";
+    out.innerHTML = `❌ ${escapeHtml(e.message)}`;
+  }
+});
+
 async function refreshHealth() {
   const box = $("#healthGrid");
   if (!box) return;

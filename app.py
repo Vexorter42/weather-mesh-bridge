@@ -1918,6 +1918,14 @@ def api_system_info():
     return jsonify(info)
 
 
+@app.route("/api/system/restart", methods=["POST"])
+def api_system_restart():
+    """Restart the systemd service (passwordless sudo). Responds first, then
+    restarts a beat later so the reply reaches the browser."""
+    _self_restart_later()
+    return jsonify({"ok": True, "restarting": True})
+
+
 @app.route("/api/system/update", methods=["POST"])
 def api_system_update():
     """Pull latest from git, install pip deps if requirements changed, and
