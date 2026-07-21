@@ -13,6 +13,7 @@ Docs:
 """
 from __future__ import annotations
 
+import collections
 import glob
 import logging
 import random
@@ -160,6 +161,9 @@ class MeshBridge:
         # under-report. We bump this on every received packet and fold it into
         # the freshness check so the count stays live without a reconnect.
         self._last_seen: dict[int, int] = {}
+        # Rolling traffic log for /traffic analytics: (ts, portnum, from_num).
+        # Bounded so a busy mesh can't grow it without limit; pruned by time on read.
+        self._traffic: "collections.deque" = collections.deque(maxlen=300000)
 
         # optional callback: gets the message dict, returns text to send back
         # (used for the !commands feature). Called in a background thread.
@@ -289,6 +293,12 @@ class MeshBridge:
             self._mark_seen(packet)
             decoded = (packet or {}).get("decoded") or {}
             portnum = decoded.get("portnum")
+
+            # Traffic accounting: every received packet, for /traffic analytics.
+            try:
+                self._traffic.append((int(time.time()), str(portnum or "?"), (packet or {}).get("from")))
+            except Exception:
+                pass
 
             # ROUTING_APP packets are ACK / NAK responses — match by request_id
             # to update delivery status of our outgoing messages.
@@ -1067,6 +1077,28 @@ class MeshBridge:
         if not out:
             out.append({"index": 0, "name": "Канал 0", "role": "primary"})
         return out
+
+    def traffic_stats(self, window_s: int = 86400, top: int = 10) -> dict[str, Any]:
+        """Packet analytics over the last `window_s`: total, breakdown by portnum
+        and the busiest source nodes. Built from the rolling traffic log."""
+        cutoff = int(time.time()) - int(window_s)
+        by_type: dict[str, int] = {}
+        by_node: dict[Any, int] = {}
+        total = 0
+        for ts, port, frm in list(self._traffic):
+            if ts < cutoff:
+                continue
+            total += 1
+            by_type[port] = by_type.get(port, 0) + 1
+            if frm is not None:
+                by_node[frm] = by_node.get(frm, 0) + 1
+        top_nodes = sorted(by_node.items(), key=lambda kv: kv[1], reverse=True)[:top]
+        return {
+            "total": total,
+            "window_s": window_s,
+            "by_type": by_type,
+            "top_nodes": [{"name": self._resolve_name(num), "count": c} for num, c in top_nodes],
+        }
 
     def get_known_nodes(self) -> list[dict[str, Any]]:
         """Return a list of nodes the bot has heard from. Used for DM selector,

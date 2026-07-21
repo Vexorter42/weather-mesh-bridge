@@ -518,6 +518,7 @@ TELEGRAM_COMMAND_BOT = TelegramCommandBot(load_config, {
     "airtime": lambda: _airtime_data(),      # defined later in the file
     "web_url": _web_url,
     "recent_alerts": lambda: _recent_alerts(),
+    "traffic": BRIDGE.traffic_stats,
 }, subs_path=BASE_DIR / "tg_subscribers.json")
 TELEGRAM_COMMAND_BOT.start_worker()
 

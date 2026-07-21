@@ -203,6 +203,7 @@ class TelegramCommandBot:
             "/mesh": self._cmd_mesh, "/nodes": self._cmd_nodes,
             "/seen": self._cmd_seen, "/route": self._cmd_route,
             "/weather": self._cmd_weather, "/air": self._cmd_air,
+            "/traffic": self._cmd_traffic,
             "/subscribe": self._cmd_subscribe, "/unsubscribe": self._cmd_unsubscribe,
             "/daily": self._cmd_daily, "/settings": self._cmd_settings,
         }.get(cmd)
@@ -228,7 +229,8 @@ class TelegramCommandBot:
             "🌐 Сеть\n"
             "/mesh — сводка сети\n"
             "/nodes — свежие узлы (SNR, батарея)\n"
-            "/air — радиоэфир (LoRa)\n\n"
+            "/air — радиоэфир (LoRa)\n"
+            "/traffic — аналитика трафика (24 ч)\n\n"
             "🔍 Узлы\n"
             "/seen <имя> — карточка узла\n"
             "/route <имя> — маршрут до узла\n\n"
@@ -374,6 +376,51 @@ class TelegramCommandBot:
         lines.append(f"📤 Наша передача: {tx:.1f}%" if tx is not None else "📤 Наша передача: —")
         lines.append(f"📦 Пакетов ↑/↓ за час: {a.get('sent_1h', 0)} / {a.get('received_1h', 0)}")
         lines.append(f"📦 За сутки: {a.get('sent_24h', 0)} / {a.get('received_24h', 0)}")
+        return "\n".join(lines)
+
+    # portnum → (emoji, label). Anything else is lumped into «Прочее».
+    _PORT_LABELS = {
+        "ROUTING_APP": ("🛣", "Маршрутизация"),
+        "POSITION_APP": ("📍", "Позиция"),
+        "TELEMETRY_APP": ("🔋", "Телеметрия"),
+        "TEXT_MESSAGE_APP": ("💬", "Сообщения"),
+        "NODEINFO_APP": ("🪪", "Инфо узлов"),
+        "TRACEROUTE_APP": ("🧭", "Трассировка"),
+        "NEIGHBORINFO_APP": ("🔗", "Соседи"),
+    }
+
+    def _cmd_traffic(self, _arg, chat=None):
+        try:
+            t = self._p["traffic"]() or {}
+        except Exception as exc:
+            return f"Аналитика недоступна: {exc}"
+        total = int(t.get("total") or 0)
+        if not total:
+            return ("📦 Аналитика трафика (24 ч)\n\n"
+                    "Пока нет данных — счётчик копится с момента запуска бота. "
+                    "Загляни попозже.")
+        pct = lambda n: f"{100 * n / total:.0f}%"
+        lines = ["📦 Аналитика трафика (24 ч)\n",
+                 f"📦 Всего пакетов: {total:,}".replace(",", " "),
+                 f"🛰 Активных узлов: {len(t.get('top_nodes') or [])}+\n"]
+
+        top = t.get("top_nodes") or []
+        if top:
+            medals = ["🥇", "🥈", "🥉"] + [f"{i}." for i in range(4, 11)]
+            lines.append("🏆 Самые активные узлы")
+            for i, n in enumerate(top):
+                lines.append(f"{medals[i]} {n['name']} — {n['count']} ({pct(n['count'])})")
+            lines.append("")
+
+        by_type = t.get("by_type") or {}
+        grouped: dict[str, int] = {}
+        for port, cnt in by_type.items():
+            emoji, label = self._PORT_LABELS.get(port, ("📦", "Прочее"))
+            key = f"{emoji} {label}"
+            grouped[key] = grouped.get(key, 0) + cnt
+        lines.append("📊 Типы пакетов")
+        for key, cnt in sorted(grouped.items(), key=lambda kv: kv[1], reverse=True):
+            lines.append(f"{key}: {cnt} ({pct(cnt)})")
         return "\n".join(lines)
 
     # ------------------------------------------------------------------
