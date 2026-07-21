@@ -58,14 +58,55 @@ def _rel(ts: int) -> str:
 
 
 class TelegramCommandBot:
-    def __init__(self, config_load: Callable[[], dict], providers: dict[str, Callable]):
+    def __init__(self, config_load: Callable[[], dict], providers: dict[str, Callable],
+                 subs_path=None):
         self._cfg = config_load
-        self._p = providers                 # stats, nodes, weather, traceroute, airtime, web_url
+        self._p = providers                 # stats, nodes, weather, traceroute, airtime, recent_alerts
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
         self._offset = 0
         self._last_error: Optional[str] = None
         self._handled = 0
+        # DM subscriptions: {str(chat_id): {"alerts": bool, "daily": bool}}
+        self._subs_path = subs_path
+        self._subs: dict[str, dict] = self._load_subs()
+        self._subs_lock = threading.Lock()
+        self._last_alert_ts = int(time.time())   # don't replay history on boot
+        self._last_daily = ""                    # YYYY-MM-DD of last daily send
+
+    # ---- subscriptions store ----
+    def _load_subs(self) -> dict:
+        import json
+        try:
+            if self._subs_path and self._subs_path.exists():
+                return json.loads(self._subs_path.read_text(encoding="utf-8"))
+        except Exception:
+            log.exception("failed to read subscribers")
+        return {}
+
+    def _save_subs(self):
+        import json
+        if not self._subs_path:
+            return
+        try:
+            tmp = self._subs_path.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(self._subs, ensure_ascii=False, indent=2), encoding="utf-8")
+            tmp.replace(self._subs_path)
+        except Exception:
+            log.exception("failed to save subscribers")
+
+    def _sub(self, chat_id, key: str, value: bool):
+        cid = str(chat_id)
+        with self._subs_lock:
+            rec = self._subs.setdefault(cid, {"alerts": False, "daily": False})
+            rec[key] = value
+            if not rec.get("alerts") and not rec.get("daily"):
+                self._subs.pop(cid, None)
+            self._save_subs()
+
+    def _subscribers(self, key: str) -> list[str]:
+        with self._subs_lock:
+            return [cid for cid, r in self._subs.items() if r.get(key)]
 
     # ------------------------------------------------------------------
 
@@ -88,6 +129,7 @@ class TelegramCommandBot:
         t = threading.Thread(target=self._loop, daemon=True, name="tg-command-bot")
         t.start()
         self._thread = t
+        threading.Thread(target=self._delivery_loop, daemon=True, name="tg-cmd-delivery").start()
         return t
 
     # ------------------------------------------------------------------
@@ -161,12 +203,13 @@ class TelegramCommandBot:
             "/mesh": self._cmd_mesh, "/nodes": self._cmd_nodes,
             "/seen": self._cmd_seen, "/route": self._cmd_route,
             "/weather": self._cmd_weather, "/air": self._cmd_air,
-            "/map": self._cmd_map,
+            "/subscribe": self._cmd_subscribe, "/unsubscribe": self._cmd_unsubscribe,
+            "/daily": self._cmd_daily, "/settings": self._cmd_settings,
         }.get(cmd)
         if not fn:
             return
         try:
-            reply = fn(arg)
+            reply = fn(arg, chat)
         except Exception as exc:
             log.exception("cmd %s failed", cmd)
             reply = f"⚠️ Ошибка: {exc}"
@@ -178,20 +221,24 @@ class TelegramCommandBot:
     # Commands
     # ------------------------------------------------------------------
 
-    def _cmd_help(self, _arg):
+    def _cmd_help(self, _arg, chat=None):
         return (
             "📡 Meshtastic-бот\n"
             "Мониторинг твоей mesh-сети.\n\n"
             "🌐 Сеть\n"
             "/mesh — сводка сети\n"
             "/nodes — свежие узлы (SNR, батарея)\n"
-            "/air — радиоэфир (LoRa)\n"
-            "/map — карта сети\n\n"
+            "/air — радиоэфир (LoRa)\n\n"
             "🔍 Узлы\n"
             "/seen <имя> — карточка узла\n"
             "/route <имя> — маршрут до узла\n\n"
             "🌦 Сервисы\n"
             "/weather — погода\n\n"
+            "🔔 Подписки (в этот чат)\n"
+            "/subscribe — алерты (гроза, дождь…)\n"
+            "/daily — ежедневная сводка\n"
+            "/settings — мои подписки\n"
+            "/unsubscribe — отписаться от всего\n\n"
             "💡 Поиск узла — по любым 3+ символам имени."
         )
 
@@ -201,7 +248,7 @@ class TelegramCommandBot:
         except Exception:
             return []
 
-    def _cmd_mesh(self, _arg):
+    def _cmd_mesh(self, _arg, chat=None):
         try:
             st = self._p["stats"]() or {}
         except Exception:
@@ -229,7 +276,7 @@ class TelegramCommandBot:
             f"🕒 {time.strftime('%H:%M')}"
         )
 
-    def _cmd_nodes(self, _arg):
+    def _cmd_nodes(self, _arg, chat=None):
         nodes = sorted(self._nodes(), key=lambda n: n.get("last_heard") or 0, reverse=True)
         if not nodes:
             return "Список узлов пуст — нода никого не слышала."
@@ -253,7 +300,7 @@ class TelegramCommandBot:
                     best = n
         return best
 
-    def _cmd_seen(self, arg):
+    def _cmd_seen(self, arg, chat=None):
         if len(arg.strip()) < 3:
             return "Использование: /seen <имя> (3+ символа). Пример: /seen KULT"
         n = self._find_node(arg)
@@ -274,7 +321,7 @@ class TelegramCommandBot:
         parts.append(f"🕒 {_rel(n.get('last_heard'))}")
         return "\n".join(parts)
 
-    def _cmd_route(self, arg):
+    def _cmd_route(self, arg, chat=None):
         if len(arg.strip()) < 3:
             return "Использование: /route <имя> (3+ символа)."
         n = self._find_node(arg)
@@ -294,7 +341,7 @@ class TelegramCommandBot:
         chain = " → ".join(h.get("name") or h.get("node_id") for h in fwd)
         return f"🛣 Маршрут до {name}\n{chain}\n({len(fwd)} hops)"
 
-    def _cmd_weather(self, _arg):
+    def _cmd_weather(self, _arg, chat=None):
         try:
             w = self._p["weather"]()
         except Exception:
@@ -315,7 +362,7 @@ class TelegramCommandBot:
             lines.append(f"💨 Ветер {w['wind_speed_ms']:.1f} м/с")
         return "\n".join(lines)
 
-    def _cmd_air(self, _arg):
+    def _cmd_air(self, _arg, chat=None):
         try:
             a = self._p["airtime"]() or {}
         except Exception:
@@ -329,13 +376,94 @@ class TelegramCommandBot:
         lines.append(f"📦 За сутки: {a.get('sent_24h', 0)} / {a.get('received_24h', 0)}")
         return "\n".join(lines)
 
-    def _cmd_map(self, _arg):
-        url = ""
+    # ------------------------------------------------------------------
+    # Subscriptions (Phase 2)
+    # ------------------------------------------------------------------
+
+    def _cmd_subscribe(self, _arg, chat=None):
+        self._sub(chat, "alerts", True)
+        return ("🔔 Подписка на алерты включена.\n"
+                "Буду присылать сюда предупреждения: гроза, приближающийся дождь, "
+                "сильный ветер, заморозки и т.п.\n\n"
+                "Ещё: /daily — ежедневная сводка · /settings — статус · /unsubscribe — отписаться.")
+
+    def _cmd_unsubscribe(self, _arg, chat=None):
+        cid = str(chat)
+        with self._subs_lock:
+            self._subs.pop(cid, None)
+            self._save_subs()
+        return "🔕 Отписал от всех рассылок."
+
+    def _cmd_daily(self, arg, chat=None):
+        want = (arg or "").strip().lower()
+        cur = str(chat) in self._subscribers("daily")
+        new = True if want in ("on", "вкл", "") and not cur else (want in ("on", "вкл"))
+        if want in ("off", "выкл"):
+            new = False
+        elif not want:
+            new = not cur                       # bare /daily toggles
+        self._sub(chat, "daily", new)
+        tm = (self._tgs().get("daily_time") or "09:00")
+        return (f"📅 Ежедневная сводка: {'✅ включена' if new else '❌ выключена'}"
+                + (f" (в {tm})" if new else ""))
+
+    def _cmd_settings(self, _arg, chat=None):
+        rec = self._subs.get(str(chat)) or {}
+        tm = (self._tgs().get("daily_time") or "09:00")
+        return ("⚙️ Твои подписки\n\n"
+                f"🔔 Алерты: {'✅ вкл' if rec.get('alerts') else '❌ выкл'}  (/subscribe · /unsubscribe)\n"
+                f"📅 Ежедневная сводка: {'✅ вкл' if rec.get('daily') else '❌ выкл'} в {tm}  (/daily)")
+
+    # ------------------------------------------------------------------
+    # Delivery loop: alerts → subscribers, daily report
+    # ------------------------------------------------------------------
+
+    def _daily_report(self) -> str:
+        return ("📊 Ежедневная сводка\n\n"
+                + self._cmd_mesh(None) + "\n\n" + self._cmd_weather(None))
+
+    def _delivery_loop(self):
+        time.sleep(40)
+        while not self._stop.is_set():
+            try:
+                if self._enabled():
+                    self._deliver_alerts()
+                    self._deliver_daily()
+            except Exception:
+                log.exception("delivery loop error")
+            self._stop.wait(45)
+
+    def _deliver_alerts(self):
+        subs = self._subscribers("alerts")
+        if not subs:
+            return
         try:
-            url = self._p["web_url"]() or ""
+            fresh = [a for a in (self._p["recent_alerts"]() or [])
+                     if int(a.get("ts") or 0) > self._last_alert_ts]
         except Exception:
-            pass
-        return f"🗺 Карта сети:\n{url}" if url else "🗺 Карта — во вкладке «Сеть» веб-интерфейса бота."
+            fresh = []
+        if not fresh:
+            return
+        self._last_alert_ts = max(int(a.get("ts") or 0) for a in fresh)
+        for a in fresh:
+            text = "🔔 " + (a.get("text") or "")
+            for cid in subs:
+                self._send(cid, text)
+
+    def _deliver_daily(self):
+        subs = self._subscribers("daily")
+        if not subs:
+            return
+        tm = (self._tgs().get("daily_time") or "09:00").strip()
+        today = time.strftime("%Y-%m-%d")
+        if self._last_daily == today:
+            return
+        if time.strftime("%H:%M") != tm:
+            return
+        self._last_daily = today
+        report = self._daily_report()
+        for cid in subs:
+            self._send(cid, report)
 
 
 __all__ = ["TelegramCommandBot"]

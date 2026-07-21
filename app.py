@@ -517,8 +517,23 @@ TELEGRAM_COMMAND_BOT = TelegramCommandBot(load_config, {
         timeout=60),
     "airtime": lambda: _airtime_data(),      # defined later in the file
     "web_url": _web_url,
-})
+    "recent_alerts": lambda: _recent_alerts(),
+}, subs_path=BASE_DIR / "tg_subscribers.json")
 TELEGRAM_COMMAND_BOT.start_worker()
+
+
+def _recent_alerts() -> list[dict]:
+    """Merge recent weather-alert + nowcast history for DM subscribers."""
+    out: list[dict] = []
+    try:
+        out += (ALERTS_STATE.status().get("history") or [])
+    except Exception:
+        pass
+    try:
+        out += (NOWCAST_STATE.status().get("history") or [])
+    except Exception:
+        pass
+    return sorted(out, key=lambda a: a.get("ts") or 0)
 
 
 def _mesh_healthcheck():
