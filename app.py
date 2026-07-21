@@ -40,6 +40,7 @@ from meshbridge import MeshBridge
 import llm
 from telegram_bridge import DEFAULTS as TG_DEFAULTS, TELETHON_AVAILABLE, TelegramBridge
 from telegram_status_bot import DEFAULTS as TGS_DEFAULTS, TelegramStatusBot
+from telegram_command_bot import TelegramCommandBot
 
 logging.basicConfig(
     level=logging.INFO,
@@ -487,6 +488,37 @@ if _tgs_cfg_init.get("enabled"):
             log.warning("Telegram status-bot auto-start skipped: %s", r.get("error"))
     except Exception:
         log.exception("Telegram status-bot auto-start crashed")
+
+
+def _web_url() -> str:
+    """Best-effort LAN URL of this web UI (for the /map command)."""
+    import socket
+    port = int(os.environ.get("WMB_PORT", "5000"))
+    scheme = "https" if os.environ.get("WMB_HTTPS", "1") not in ("0", "false") else "http"
+    ip = "127.0.0.1"
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+    except Exception:
+        pass
+    return f"{scheme}://{ip}:{port}/"
+
+
+# Interactive Telegram command bot (same token as the status-bot).
+TELEGRAM_COMMAND_BOT = TelegramCommandBot(load_config, {
+    "stats": _tg_status_stats,
+    "nodes": BRIDGE.get_known_nodes,
+    "weather": _tg_status_weather,
+    "traceroute": lambda dest: BRIDGE.traceroute(
+        dest, hop_limit=5,
+        channel_index=int((load_config().get("mesh") or {}).get("channel_index", 0)),
+        timeout=60),
+    "airtime": lambda: _airtime_data(),      # defined later in the file
+    "web_url": _web_url,
+})
+TELEGRAM_COMMAND_BOT.start_worker()
 
 
 def _mesh_healthcheck():
@@ -1548,6 +1580,7 @@ def api_tg_status_get():
             "chat_id":        cfg.get("chat_id") or "",
             "update_seconds": cfg.get("update_seconds") or 60,
             "auto_pin":       cfg.get("auto_pin") is not False,
+            "commands_enabled": bool(cfg.get("commands_enabled")),
             "proxy":          cfg.get("proxy") or "",
             "message_id":     cfg.get("message_id"),
             "show_mesh_stats": cfg.get("show_mesh_stats") is not False,
@@ -1693,9 +1726,10 @@ def api_stats():
 
 
 @app.route("/api/airtime", methods=["GET"])
-def api_airtime():
-    """LoRa channel-load monitor: the local node's own channel utilization and
-    air-util-TX (from its telemetry) + our outgoing/incoming packet counts."""
+def _airtime_data() -> dict[str, Any]:
+    """LoRa channel-load: local node's channel utilization + air-util-TX (from
+    telemetry) + our outgoing/incoming packet counts. Shared by the API and the
+    Telegram command bot."""
     mesh = BRIDGE.status()
     my_num = mesh.get("my_node_num")
     chan_util = air_tx = None
@@ -1707,12 +1741,17 @@ def api_airtime():
                 break
     out = {
         "connected": bool(mesh.get("connected")),
-        "channel_utilization": chan_util,   # % of airtime the channel is busy
-        "air_util_tx": air_tx,              # % of time our node is transmitting
+        "channel_utilization": chan_util,
+        "air_util_tx": air_tx,
         "nodes_online_2h": mesh.get("nodes_online_2h"),
     }
     out.update(CHAT_DB.airtime_counts())
-    return jsonify(out)
+    return out
+
+
+def api_airtime():
+    """LoRa channel-load monitor endpoint."""
+    return jsonify(_airtime_data())
 
 
 @app.route("/api/health", methods=["GET"])

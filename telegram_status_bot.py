@@ -38,6 +38,7 @@ DEFAULTS = {
     "chat_id": "",            # number, can be negative (-100… for supergroups)
     "update_seconds": 60,     # how often we re-edit the pinned message
     "auto_pin": True,         # try to pin the message on first send
+    "commands_enabled": False,  # answer /commands in DMs/chats (telegram_command_bot)
     # Proxy URL — usually same as in telegram bridge config. Empty = direct.
     "proxy": "",
     # Persisted state (filled by the worker, don't edit by hand)
