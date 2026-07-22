@@ -347,6 +347,42 @@ def _start_telemetry_collector(interval_seconds: int = 600) -> threading.Thread:
 _start_telemetry_collector()
 
 
+# --- Packet stats: buffer received packets, flush to history.db periodically ---
+_pkt_batch: list = []
+_pkt_lock = threading.Lock()
+
+
+def _on_packet(ts, portnum, from_num):
+    with _pkt_lock:
+        _pkt_batch.append((ts, portnum, from_num))
+
+
+BRIDGE.set_packet_callback(_on_packet)
+
+
+def _start_stats_flusher(interval_seconds: int = 45) -> threading.Thread:
+    def loop():
+        time.sleep(30)
+        while True:
+            try:
+                with _pkt_lock:
+                    batch = _pkt_batch[:]
+                    _pkt_batch.clear()
+                if batch:
+                    HISTORY_DB.ingest_packets(batch)
+                HISTORY_DB.prune_traffic(30)
+            except Exception:
+                log.exception("Stats flusher crashed (will retry)")
+            time.sleep(interval_seconds)
+
+    t = threading.Thread(target=loop, daemon=True, name="stats-flusher")
+    t.start()
+    return t
+
+
+_start_stats_flusher()
+
+
 def _telegram_forward(text: str, channel_index: int, destination: str) -> None:
     """Mesh-send callback handed to TelegramBridge. Lives in app.py so it can
     re-use the configured chunk delay and mesh settings."""
@@ -519,6 +555,9 @@ TELEGRAM_COMMAND_BOT = TelegramCommandBot(load_config, {
     "web_url": _web_url,
     "recent_alerts": lambda: _recent_alerts(),
     "traffic": BRIDGE.traffic_stats,
+    "daily_report": lambda: _daily_report_text(),
+    "activity_report": lambda: _activity_report_text(),
+    "record_command": HISTORY_DB.record_command,
 }, subs_path=BASE_DIR / "tg_subscribers.json")
 TELEGRAM_COMMAND_BOT.start_worker()
 
@@ -535,6 +574,106 @@ def _recent_alerts() -> list[dict]:
     except Exception:
         pass
     return sorted(out, key=lambda a: a.get("ts") or 0)
+
+
+_RU_MONTHS = ["", "января", "февраля", "марта", "апреля", "мая", "июня",
+              "июля", "августа", "сентября", "октября", "ноября", "декабря"]
+_RU_DOW = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+
+
+def _fmt_num(n) -> str:
+    return f"{int(n):,}".replace(",", " ")
+
+
+def _node_names() -> dict:
+    return {n["num"]: (n.get("long_name") or n.get("short_name") or n.get("node_id") or f"!{n.get('num')}")
+            for n in BRIDGE.get_known_nodes() if n.get("num") is not None}
+
+
+def _daily_report_text() -> str:
+    d = HISTORY_DB.daily_report_data()
+    if not d.get("total"):
+        return ("📊 Ежедневный отчёт\n\n"
+                "Пока нет данных за сегодня — статистика копится с момента запуска бота.")
+    names = _node_names()
+    lt = time.localtime()
+    date_str = f"{lt.tm_mday} {_RU_MONTHS[lt.tm_mon]} {lt.tm_year}"
+    medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣"]
+    L = [f"📊 Ежедневный отчёт", f"за {date_str}\n",
+         f"📦 {_fmt_num(d['total'])} пакетов",
+         f"🛰 Активных узлов: {d['active_nodes']}",
+         f"🆕 Новых узлов: {d['new_nodes']}",
+         f"⏱ Среднее: {_fmt_num(d['avg_hour'])} пакетов/час\n"]
+    if d.get("peak_hour") is not None:
+        ph = d["peak_hour"]
+        L.append("🔥 Пик активности")
+        L.append(f"{ph:02d}:00–{(ph + 1) % 24:02d}:00 • {_fmt_num(d['peak_count'])} пакетов\n")
+    if d.get("min_hour") is not None:
+        L.append("🌙 Минимум")
+        L.append(f"{d['min_hour']:02d}:00 • {_fmt_num(d['min_count'])} пакетов\n")
+    if d.get("top_nodes"):
+        L.append("🏆 Самые активные узлы")
+        for i, n in enumerate(d["top_nodes"]):
+            L.append(f"{medals[i]} {names.get(n['num'], '!'+str(n['num']))} — {_fmt_num(n['count'])} пакетов")
+        L.append("")
+    if d.get("top_users"):
+        L.append(f"👥 Самые активные пользователи ({d['users_total']} всего)")
+        for i, u in enumerate(d["top_users"]):
+            L.append(f"{medals[i]} {u['user']} — {u['count']} команд")
+        L.append("")
+    # events + dynamics
+    yt = d.get("yesterday_total") or 0
+    ev = []
+    if d["new_nodes"]:
+        ev.append(f"🆕 Сеть пополнилась {d['new_nodes']} новыми узлами!")
+    if d["top_nodes"]:
+        tn = d["top_nodes"][0]
+        ev.append(f"⭐ Узел дня: {names.get(tn['num'], '!'+str(tn['num']))} — {_fmt_num(tn['count'])} пакетов")
+    if yt and d["total"] > yt:
+        ev.append("🏆 Новый максимум суточного трафика!")
+    if ev:
+        L.append("💡 События дня")
+        L += ev
+        L.append("")
+    if yt:
+        diff = round(100 * (d["total"] - yt) / yt)
+        arrow = "📈" if diff > 0 else ("📉" if diff < 0 else "➡️")
+        L.append(f"📊 Динамика: {arrow} {diff:+d}% к вчерашнему дню\n")
+    L.append("📈 Подробнее: /activity · ⚙️ /settings")
+    L.append(f"🔄 {time.strftime('%H:%M')}")
+    return "\n".join(L)
+
+
+def _bar(val: int, mx: int, width: int = 8) -> str:
+    if mx <= 0:
+        return "○" * width
+    filled = max(0, min(width, round(val / mx * width)))
+    return "●" * filled + "○" * (width - filled)
+
+
+def _activity_report_text() -> str:
+    a = HISTORY_DB.activity_data(7)
+    if not a.get("total"):
+        return ("📈 Активность сети\n\n"
+                "Пока мало данных — статистика копится с момента запуска бота.")
+    L = ["📈 Активность сети Meshtastic\n",
+         f"📊 За последние {a['days']} дней",
+         f"📦 Всего пакетов: {_fmt_num(a['total'])}",
+         f"📈 Среднее за день: {_fmt_num(a['avg_day'])}\n",
+         "📅 По дням недели"]
+    dm = max(a["by_dow"]) or 1
+    for i, v in enumerate(a["by_dow"]):
+        L.append(f"{_RU_DOW[i]} {_bar(v, dm)} {round(100 * v / dm)}% {_fmt_num(v)}")
+    L.append("\n📊 По часам")
+    hm = max(a["by_hour"]) or 1
+    for h, v in enumerate(a["by_hour"]):
+        L.append(f"{h:02d}:00 {_bar(v, hm, 6)} {round(100 * v / hm)}% {_fmt_num(v)}")
+    peak_h = max(range(24), key=lambda h: a["by_hour"][h])
+    min_h = min(range(24), key=lambda h: a["by_hour"][h])
+    L.append(f"\n🔥 Пик: {peak_h:02d}:00 • {_fmt_num(a['by_hour'][peak_h])}")
+    L.append(f"🌙 Минимум: {min_h:02d}:00 • {_fmt_num(a['by_hour'][min_h])}")
+    L.append(f"🔄 {time.strftime('%H:%M')}")
+    return "\n".join(L)
 
 
 def _mesh_healthcheck():
@@ -1597,6 +1736,7 @@ def api_tg_status_get():
             "update_seconds": cfg.get("update_seconds") or 60,
             "auto_pin":       cfg.get("auto_pin") is not False,
             "commands_enabled": bool(cfg.get("commands_enabled")),
+            "daily_time":     cfg.get("daily_time") or "09:00",
             "proxy":          cfg.get("proxy") or "",
             "message_id":     cfg.get("message_id"),
             "show_mesh_stats": cfg.get("show_mesh_stats") is not False,

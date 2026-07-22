@@ -203,12 +203,19 @@ class TelegramCommandBot:
             "/mesh": self._cmd_mesh, "/nodes": self._cmd_nodes,
             "/seen": self._cmd_seen, "/route": self._cmd_route,
             "/weather": self._cmd_weather, "/air": self._cmd_air,
-            "/traffic": self._cmd_traffic,
+            "/traffic": self._cmd_traffic, "/activity": self._cmd_activity,
             "/subscribe": self._cmd_subscribe, "/unsubscribe": self._cmd_unsubscribe,
             "/daily": self._cmd_daily, "/settings": self._cmd_settings,
         }.get(cmd)
         if not fn:
             return
+        # Count command usage for the daily report's "top users" section.
+        try:
+            frm = msg.get("from") or {}
+            user = frm.get("username") or frm.get("first_name") or str(frm.get("id") or "?")
+            self._p.get("record_command", lambda *_: None)(user)
+        except Exception:
+            pass
         try:
             reply = fn(arg, chat)
         except Exception as exc:
@@ -230,7 +237,8 @@ class TelegramCommandBot:
             "/mesh — сводка сети\n"
             "/nodes — свежие узлы (SNR, батарея)\n"
             "/air — радиоэфир (LoRa)\n"
-            "/traffic — аналитика трафика (24 ч)\n\n"
+            "/traffic — аналитика трафика (24 ч)\n"
+            "/activity — активность за 7 дней\n\n"
             "🔍 Узлы\n"
             "/seen <имя> — карточка узла\n"
             "/route <имя> — маршрут до узла\n\n"
@@ -423,6 +431,12 @@ class TelegramCommandBot:
             lines.append(f"{key}: {cnt} ({pct(cnt)})")
         return "\n".join(lines)
 
+    def _cmd_activity(self, _arg, chat=None):
+        try:
+            return self._p["activity_report"]()
+        except Exception as exc:
+            return f"Активность недоступна: {exc}"
+
     # ------------------------------------------------------------------
     # Subscriptions (Phase 2)
     # ------------------------------------------------------------------
@@ -466,8 +480,14 @@ class TelegramCommandBot:
     # ------------------------------------------------------------------
 
     def _daily_report(self) -> str:
-        return ("📊 Ежедневная сводка\n\n"
-                + self._cmd_mesh(None) + "\n\n" + self._cmd_weather(None))
+        try:
+            report = self._p.get("daily_report", lambda: None)()
+            if report:
+                return report
+        except Exception:
+            log.exception("daily_report provider failed")
+        # Fallback to a minimal digest if the analytics report isn't available.
+        return "📊 Ежедневная сводка\n\n" + self._cmd_mesh(None) + "\n\n" + self._cmd_weather(None)
 
     def _delivery_loop(self):
         time.sleep(40)

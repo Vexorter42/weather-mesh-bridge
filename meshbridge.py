@@ -164,6 +164,8 @@ class MeshBridge:
         # Rolling traffic log for /traffic analytics: (ts, portnum, from_num).
         # Bounded so a busy mesh can't grow it without limit; pruned by time on read.
         self._traffic: "collections.deque" = collections.deque(maxlen=300000)
+        # Optional callback(ts, portnum, from_num) — app.py persists to history_db.
+        self._pkt_callback: Optional[Callable] = None
 
         # optional callback: gets the message dict, returns text to send back
         # (used for the !commands feature). Called in a background thread.
@@ -179,6 +181,9 @@ class MeshBridge:
         # to let the air clear. Configurable via set_command_reply_delay().
         self._reply_delay_min = 5.0
         self._reply_delay_max = 10.0
+
+    def set_packet_callback(self, fn) -> None:
+        self._pkt_callback = fn
 
     def set_chat_db(self, db: Any) -> None:
         self._db = db
@@ -296,7 +301,10 @@ class MeshBridge:
 
             # Traffic accounting: every received packet, for /traffic analytics.
             try:
-                self._traffic.append((int(time.time()), str(portnum or "?"), (packet or {}).get("from")))
+                _ev = (int(time.time()), str(portnum or "?"), (packet or {}).get("from"))
+                self._traffic.append(_ev)
+                if self._pkt_callback:
+                    self._pkt_callback(*_ev)
             except Exception:
                 pass
 

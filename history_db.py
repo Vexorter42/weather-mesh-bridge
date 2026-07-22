@@ -82,6 +82,133 @@ class HistoryDb:
                 """
             )
             c.execute("CREATE INDEX IF NOT EXISTS idx_trace_dest_time ON traceroute_history(dest_id, time)")
+            # --- traffic analytics (daily report + /activity) ---
+            c.execute("CREATE TABLE IF NOT EXISTS traffic_hourly (hour INTEGER PRIMARY KEY, total INTEGER NOT NULL)")
+            c.execute("CREATE TABLE IF NOT EXISTS node_seen (num INTEGER PRIMARY KEY, first_ts INTEGER, last_ts INTEGER, total INTEGER)")
+            c.execute("CREATE TABLE IF NOT EXISTS node_daily (day TEXT, num INTEGER, count INTEGER, PRIMARY KEY(day, num))")
+            c.execute("CREATE TABLE IF NOT EXISTS cmd_usage (day TEXT, user TEXT, count INTEGER, PRIMARY KEY(day, user))")
+
+    # ------------------------------------------------------------------
+    # Traffic analytics
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _daykey(ts: int) -> str:
+        return time.strftime("%Y-%m-%d", time.localtime(ts))
+
+    def ingest_packets(self, events: list) -> None:
+        """Aggregate a batch of received packets. events = [(ts, portnum, from_num)]."""
+        if not events:
+            return
+        hourly: dict[int, int] = {}
+        daily: dict[tuple, int] = {}
+        seen: dict[int, list] = {}          # num -> [first_ts, last_ts, count]
+        for ts, _port, num in events:
+            ts = int(ts)
+            hourly[ts // 3600] = hourly.get(ts // 3600, 0) + 1
+            if num is not None:
+                daily[(self._daykey(ts), num)] = daily.get((self._daykey(ts), num), 0) + 1
+                s = seen.setdefault(num, [ts, ts, 0])
+                s[0] = min(s[0], ts); s[1] = max(s[1], ts); s[2] += 1
+        with self._lock:
+            c = self._connect()
+            c.execute("BEGIN")
+            try:
+                for h, n in hourly.items():
+                    c.execute("INSERT INTO traffic_hourly(hour,total) VALUES(?,?) "
+                              "ON CONFLICT(hour) DO UPDATE SET total=total+?", (h, n, n))
+                for (day, num), n in daily.items():
+                    c.execute("INSERT INTO node_daily(day,num,count) VALUES(?,?,?) "
+                              "ON CONFLICT(day,num) DO UPDATE SET count=count+?", (day, num, n, n))
+                for num, (fts, lts, n) in seen.items():
+                    c.execute("INSERT INTO node_seen(num,first_ts,last_ts,total) VALUES(?,?,?,?) "
+                              "ON CONFLICT(num) DO UPDATE SET last_ts=max(last_ts,?), total=total+?",
+                              (num, fts, lts, n, lts, n))
+                c.execute("COMMIT")
+            except Exception:
+                c.execute("ROLLBACK")
+                raise
+
+    def record_command(self, user: str) -> None:
+        if not user:
+            return
+        with self._lock:
+            self._connect().execute(
+                "INSERT INTO cmd_usage(day,user,count) VALUES(?,?,1) "
+                "ON CONFLICT(day,user) DO UPDATE SET count=count+1",
+                (self._daykey(int(time.time())), user))
+
+    def _hours(self, from_hour: int, to_hour: int) -> dict[int, int]:
+        with self._lock:
+            rows = self._connect().execute(
+                "SELECT hour,total FROM traffic_hourly WHERE hour>=? AND hour<? ORDER BY hour",
+                (from_hour, to_hour)).fetchall()
+        return {int(r["hour"]): int(r["total"]) for r in rows}
+
+    def daily_report_data(self, day_ts: Optional[int] = None) -> dict[str, Any]:
+        """Everything the OwearBot-style daily report needs for the given day."""
+        now = day_ts or int(time.time())
+        day = self._daykey(now)
+        # local midnight of that day → hour range
+        lt = time.localtime(now)
+        midnight = int(time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 0, 0, 0, 0, 0, -1)))
+        h0, h24 = midnight // 3600, midnight // 3600 + 24
+        hours = self._hours(h0, h24)
+        total = sum(hours.values())
+        # per-hour counts aligned 0..23 (local hour)
+        by_hour = {}
+        for h, n in hours.items():
+            by_hour[time.localtime(h * 3600).tm_hour] = by_hour.get(time.localtime(h * 3600).tm_hour, 0) + n
+        peak_h = max(by_hour, key=by_hour.get) if by_hour else None
+        min_h = min(by_hour, key=by_hour.get) if by_hour else None
+        # yesterday total
+        y0, y24 = h0 - 24, h0
+        y_total = sum(self._hours(y0, y24).values())
+        with self._lock:
+            c = self._connect()
+            active = c.execute("SELECT COUNT(*) FROM node_daily WHERE day=?", (day,)).fetchone()[0]
+            top = c.execute("SELECT num,count FROM node_daily WHERE day=? ORDER BY count DESC LIMIT 5",
+                            (day,)).fetchall()
+            new_nodes = c.execute("SELECT COUNT(*) FROM node_seen WHERE first_ts>=? AND first_ts<?",
+                                  (midnight, midnight + 86400)).fetchone()[0]
+            users = c.execute("SELECT user,count FROM cmd_usage WHERE day=? ORDER BY count DESC LIMIT 5",
+                              (day,)).fetchall()
+            users_total = c.execute("SELECT COUNT(*) FROM cmd_usage WHERE day=?", (day,)).fetchone()[0]
+        return {
+            "day": day, "total": total, "active_nodes": int(active),
+            "new_nodes": int(new_nodes), "avg_hour": round(total / 24) if total else 0,
+            "peak_hour": peak_h, "peak_count": by_hour.get(peak_h, 0) if peak_h is not None else 0,
+            "min_hour": min_h, "min_count": by_hour.get(min_h, 0) if min_h is not None else 0,
+            "top_nodes": [{"num": r["num"], "count": r["count"]} for r in top],
+            "top_users": [{"user": r["user"], "count": r["count"]} for r in users],
+            "users_total": int(users_total),
+            "yesterday_total": y_total,
+        }
+
+    def activity_data(self, days: int = 7) -> dict[str, Any]:
+        """7-day activity: totals + by weekday + by hour-of-day."""
+        now = int(time.time())
+        cur_hour = now // 3600
+        from_hour = cur_hour - days * 24
+        hours = self._hours(from_hour, cur_hour + 1)
+        total = sum(hours.values())
+        by_dow = [0] * 7      # Mon..Sun
+        by_hod = [0] * 24
+        for h, n in hours.items():
+            lt = time.localtime(h * 3600)
+            by_dow[lt.tm_wday] += n
+            by_hod[lt.tm_hour] += n
+        return {"days": days, "total": total, "avg_day": round(total / days) if total else 0,
+                "by_dow": by_dow, "by_hour": by_hod}
+
+    def prune_traffic(self, days: int = 30) -> None:
+        cutoff_hour = (int(time.time()) - days * 86400) // 3600
+        cutoff_day = self._daykey(int(time.time()) - days * 86400)
+        with self._lock:
+            c = self._connect()
+            c.execute("DELETE FROM traffic_hourly WHERE hour < ?", (cutoff_hour,))
+            c.execute("DELETE FROM node_daily WHERE day < ?", (cutoff_day,))
+            c.execute("DELETE FROM cmd_usage WHERE day < ?", (cutoff_day,))
 
     # ------------------------------------------------------------------
     # Telemetry
