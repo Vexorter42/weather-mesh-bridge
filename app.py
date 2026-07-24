@@ -585,62 +585,95 @@ def _fmt_num(n) -> str:
     return f"{int(n):,}".replace(",", " ")
 
 
+def _plural(n: int, one: str, few: str, many: str) -> str:
+    n = abs(int(n)); d, dd = n % 10, n % 100
+    if d == 1 and dd != 11:
+        return one
+    if 2 <= d <= 4 and not (12 <= dd <= 14):
+        return few
+    return many
+
+
+def _pkts(n) -> str:
+    return f"{_fmt_num(n)} {_plural(n, 'пакет', 'пакета', 'пакетов')}"
+
+
 def _node_names() -> dict:
     return {n["num"]: (n.get("long_name") or n.get("short_name") or n.get("node_id") or f"!{n.get('num')}")
             for n in BRIDGE.get_known_nodes() if n.get("num") is not None}
+
+
+def _region_label() -> str:
+    """Region shown in the report header — the configured weather city, if any."""
+    city = ((load_config().get("location") or {}).get("name") or "").strip()
+    return f" ({city})" if city else ""
+
+
+def _gateway_line() -> str:
+    """Our single receiver (the Heltec gateway) — analogue of OwearBot's S1/S2."""
+    mesh = BRIDGE.status()
+    name = "Heltec"
+    num = mesh.get("my_node_num")
+    if num is not None:
+        name = _node_names().get(num, name)
+    online = bool(mesh.get("connected"))
+    return f"{'🟢' if online else '🔴'} {name} — {'Online' if online else 'Offline'}"
 
 
 def _daily_report_text() -> str:
     d = HISTORY_DB.daily_report_data()
     if not d.get("total"):
         return ("📊 Ежедневный отчёт\n\n"
-                "Пока нет данных за сегодня — статистика копится с момента запуска бота.")
+                "Пока нет данных за прошлые сутки — статистика копится с момента запуска бота.")
     names = _node_names()
-    lt = time.localtime()
+    lt = time.localtime(d.get("date_ts") or time.time())
     date_str = f"{lt.tm_mday} {_RU_MONTHS[lt.tm_mon]} {lt.tm_year}"
     medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣"]
-    L = [f"📊 Ежедневный отчёт", f"за {date_str}\n",
-         f"📦 {_fmt_num(d['total'])} пакетов",
+    L = ["📊 Ежедневный отчёт", f"за {date_str}{_region_label()}\n",
+         f"📦 {_pkts(d['total'])}",
          f"🛰 Активных узлов: {d['active_nodes']}",
          f"🆕 Новых узлов: {d['new_nodes']}",
          f"⏱ Среднее: {_fmt_num(d['avg_hour'])} пакетов/час\n"]
     if d.get("peak_hour") is not None:
         ph = d["peak_hour"]
-        L.append("🔥 Пик активности")
-        L.append(f"{ph:02d}:00–{(ph + 1) % 24:02d}:00 • {_fmt_num(d['peak_count'])} пакетов\n")
+        L += ["🔥 Пик активности", f"{ph:02d}:00–{(ph + 1) % 24:02d}:00 • {_pkts(d['peak_count'])}\n"]
     if d.get("min_hour") is not None:
-        L.append("🌙 Минимум")
-        L.append(f"{d['min_hour']:02d}:00 • {_fmt_num(d['min_count'])} пакетов\n")
+        L += ["🌙 Минимум", f"{d['min_hour']:02d}:00 • {_pkts(d['min_count'])}\n"]
     if d.get("top_nodes"):
         L.append("🏆 Самые активные узлы")
         for i, n in enumerate(d["top_nodes"]):
-            L.append(f"{medals[i]} {names.get(n['num'], '!'+str(n['num']))} — {_fmt_num(n['count'])} пакетов")
+            L.append(f"{medals[i]} {names.get(n['num'], '!'+str(n['num']))} — {_pkts(n['count'])}")
         L.append("")
+    L += ["📻 Приёмник", _gateway_line(), ""]
     if d.get("top_users"):
         L.append(f"👥 Самые активные пользователи ({d['users_total']} всего)")
         for i, u in enumerate(d["top_users"]):
-            L.append(f"{medals[i]} {u['user']} — {u['count']} команд")
+            L.append(f"{medals[i]} {u['user']} — {u['count']} {_plural(u['count'], 'команда', 'команды', 'команд')}")
         L.append("")
-    # events + dynamics
+    # events of the day
     yt = d.get("yesterday_total") or 0
+    diff = round(100 * (d["total"] - yt) / yt) if yt else None
     ev = []
     if d["new_nodes"]:
-        ev.append(f"🆕 Сеть пополнилась {d['new_nodes']} новыми узлами!")
+        ev.append(f"🆕 Сегодня сеть пополнилась {d['new_nodes']} новыми узлами!")
+    if d.get("is_record"):
+        ev.append("🏆 Новый рекорд суточного трафика!" + (f" ({diff:+d}%)" if diff is not None else ""))
     if d["top_nodes"]:
         tn = d["top_nodes"][0]
-        ev.append(f"⭐ Узел дня: {names.get(tn['num'], '!'+str(tn['num']))} — {_fmt_num(tn['count'])} пакетов")
-    if yt and d["total"] > yt:
-        ev.append("🏆 Новый максимум суточного трафика!")
+        ev.append(f"⭐ Узел дня: {names.get(tn['num'], '!'+str(tn['num']))} — {_pkts(tn['count'])}")
+    if d.get("peak_hour") is not None and d["peak_hour"] <= 6:
+        ev.append(f"🌙 Необычно высокая ночная активность в {d['peak_hour']:02d}:00.")
     if ev:
         L.append("💡 События дня")
         L += ev
         L.append("")
-    if yt:
-        diff = round(100 * (d["total"] - yt) / yt)
+    if diff is not None:
         arrow = "📈" if diff > 0 else ("📉" if diff < 0 else "➡️")
         L.append(f"📊 Динамика: {arrow} {diff:+d}% к вчерашнему дню\n")
-    L.append("📈 Подробнее: /activity · ⚙️ /settings")
-    L.append(f"🔄 {time.strftime('%H:%M')}")
+    L += ["📊 Полная аналитика: /activity",
+          "⚙️ Настройки уведомлений: /settings",
+          "📈 Популярные команды: /mesh • /seen • /nodes • /traffic\n",
+          f"🔄 Обновлено: {time.strftime('%H:%M %Z')}"]
     return "\n".join(L)
 
 

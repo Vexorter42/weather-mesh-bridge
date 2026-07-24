@@ -146,24 +146,31 @@ class HistoryDb:
         return {int(r["hour"]): int(r["total"]) for r in rows}
 
     def daily_report_data(self, day_ts: Optional[int] = None) -> dict[str, Any]:
-        """Everything the OwearBot-style daily report needs for the given day."""
-        now = day_ts or int(time.time())
+        """OwearBot-style daily report data. Defaults to the PREVIOUS full day
+        (a 09:00 digest summarises yesterday, not the current 9 hours)."""
+        now = day_ts if day_ts is not None else int(time.time()) - 86400
         day = self._daykey(now)
-        # local midnight of that day → hour range
         lt = time.localtime(now)
         midnight = int(time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 0, 0, 0, 0, 0, -1)))
         h0, h24 = midnight // 3600, midnight // 3600 + 24
         hours = self._hours(h0, h24)
         total = sum(hours.values())
         # per-hour counts aligned 0..23 (local hour)
-        by_hour = {}
+        by_hour: dict[int, int] = {}
         for h, n in hours.items():
-            by_hour[time.localtime(h * 3600).tm_hour] = by_hour.get(time.localtime(h * 3600).tm_hour, 0) + n
+            hh = time.localtime(h * 3600).tm_hour
+            by_hour[hh] = by_hour.get(hh, 0) + n
         peak_h = max(by_hour, key=by_hour.get) if by_hour else None
         min_h = min(by_hour, key=by_hour.get) if by_hour else None
-        # yesterday total
-        y0, y24 = h0 - 24, h0
-        y_total = sum(self._hours(y0, y24).values())
+        # previous day total (for the day-over-day dynamics)
+        y_total = sum(self._hours(h0 - 24, h0).values())
+        # record detection: was this day the busiest of the last ~14?
+        recent = self._hours(h0 - 14 * 24, h24)
+        day_totals: dict[str, int] = {}
+        for h, n in recent.items():
+            dk = self._daykey(h * 3600)
+            day_totals[dk] = day_totals.get(dk, 0) + n
+        prior_max = max((v for k, v in day_totals.items() if k != day), default=0)
         with self._lock:
             c = self._connect()
             active = c.execute("SELECT COUNT(*) FROM node_daily WHERE day=?", (day,)).fetchone()[0]
@@ -175,7 +182,7 @@ class HistoryDb:
                               (day,)).fetchall()
             users_total = c.execute("SELECT COUNT(*) FROM cmd_usage WHERE day=?", (day,)).fetchone()[0]
         return {
-            "day": day, "total": total, "active_nodes": int(active),
+            "day": day, "date_ts": midnight, "total": total, "active_nodes": int(active),
             "new_nodes": int(new_nodes), "avg_hour": round(total / 24) if total else 0,
             "peak_hour": peak_h, "peak_count": by_hour.get(peak_h, 0) if peak_h is not None else 0,
             "min_hour": min_h, "min_count": by_hour.get(min_h, 0) if min_h is not None else 0,
@@ -183,6 +190,7 @@ class HistoryDb:
             "top_users": [{"user": r["user"], "count": r["count"]} for r in users],
             "users_total": int(users_total),
             "yesterday_total": y_total,
+            "is_record": bool(total and total > prior_max),
         }
 
     def activity_data(self, days: int = 7) -> dict[str, Any]:
