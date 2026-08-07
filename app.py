@@ -558,8 +558,30 @@ TELEGRAM_COMMAND_BOT = TelegramCommandBot(load_config, {
     "daily_report": lambda: _daily_report_text(),
     "activity_report": lambda: _activity_report_text(),
     "record_command": HISTORY_DB.record_command,
+    # ---- admin panel (owner-only commands) ----
+    "send_mesh": lambda text: BRIDGE.send_text_chunked(
+        text,
+        channel_index=int((load_config().get("mesh") or {}).get("channel_index", 0)),
+        destination=((load_config().get("mesh") or {}).get("destination") or "broadcast")),
+    "restart": lambda: _self_restart_later(),   # defined later in the file
+    "bot_status": lambda: _bot_status(),
 }, subs_path=BASE_DIR / "tg_subscribers.json")
 TELEGRAM_COMMAND_BOT.start_worker()
+
+
+def _bot_status() -> dict[str, Any]:
+    """Compact bot health for the Telegram admin panel's /status command."""
+    mesh = BRIDGE.status()
+    exit_info = _proxy_exit_ip(load_config())
+    return {
+        "version": VERSION,
+        "uptime_s": int(time.time() - commands.BOT_START_TS),
+        "mesh_connected": bool(mesh.get("connected")),
+        "nodes_online": mesh.get("nodes_online_2h"),
+        "nodes_known": mesh.get("nodes_known"),
+        "proxy_via": bool(exit_info.get("via")),
+        "proxy_ip": exit_info.get("ip"),
+    }
 
 
 def _recent_alerts() -> list[dict]:
@@ -1770,6 +1792,7 @@ def api_tg_status_get():
             "auto_pin":       cfg.get("auto_pin") is not False,
             "commands_enabled": bool(cfg.get("commands_enabled")),
             "daily_time":     cfg.get("daily_time") or "09:00",
+            "admin_secret":   cfg.get("admin_secret") or "",
             "proxy":          cfg.get("proxy") or "",
             "message_id":     cfg.get("message_id"),
             "show_mesh_stats": cfg.get("show_mesh_stats") is not False,

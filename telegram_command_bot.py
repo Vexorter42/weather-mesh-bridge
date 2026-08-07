@@ -100,13 +100,21 @@ class TelegramCommandBot:
         with self._subs_lock:
             rec = self._subs.setdefault(cid, {"alerts": False, "daily": False})
             rec[key] = value
-            if not rec.get("alerts") and not rec.get("daily"):
+            if not any(rec.get(k) for k in ("alerts", "daily", "admin")):
                 self._subs.pop(cid, None)
             self._save_subs()
 
     def _subscribers(self, key: str) -> list[str]:
         with self._subs_lock:
             return [cid for cid, r in self._subs.items() if r.get(key)]
+
+    # ---- admin access ----
+    def _is_admin(self, chat) -> bool:
+        cid = str(chat)
+        ids = [str(x) for x in (self._tgs().get("admin_ids") or [])]
+        if cid in ids:
+            return True
+        return bool((self._subs.get(cid) or {}).get("admin"))
 
     # ------------------------------------------------------------------
 
@@ -206,6 +214,9 @@ class TelegramCommandBot:
             "/traffic": self._cmd_traffic, "/activity": self._cmd_activity,
             "/subscribe": self._cmd_subscribe, "/unsubscribe": self._cmd_unsubscribe,
             "/daily": self._cmd_daily, "/settings": self._cmd_settings,
+            "/admin": self._cmd_admin, "/say": self._cmd_say, "/broadcast": self._cmd_say,
+            "/status": self._cmd_status, "/restart": self._cmd_restart,
+            "/sendreport": self._cmd_sendreport, "/announce": self._cmd_announce,
         }.get(cmd)
         if not fn:
             return
@@ -230,7 +241,7 @@ class TelegramCommandBot:
     # ------------------------------------------------------------------
 
     def _cmd_help(self, _arg, chat=None):
-        return (
+        base = (
             "📡 Meshtastic-бот\n"
             "Мониторинг твоей mesh-сети.\n\n"
             "🌐 Сеть\n"
@@ -251,6 +262,17 @@ class TelegramCommandBot:
             "/unsubscribe — отписаться от всего\n\n"
             "💡 Поиск узла — по любым 3+ символам имени."
         )
+        if self._is_admin(chat):
+            base += (
+                "\n\n🔐 Админ\n"
+                "/admin — админ-панель\n"
+                "/say — отправить в mesh\n"
+                "/announce — объявление подписчикам\n"
+                "/status — состояние бота\n"
+                "/sendreport — разослать отчёт\n"
+                "/restart — перезапуск"
+            )
+        return base
 
     def _nodes(self) -> list[dict]:
         try:
@@ -471,9 +493,114 @@ class TelegramCommandBot:
     def _cmd_settings(self, _arg, chat=None):
         rec = self._subs.get(str(chat)) or {}
         tm = (self._tgs().get("daily_time") or "09:00")
-        return ("⚙️ Твои подписки\n\n"
-                f"🔔 Алерты: {'✅ вкл' if rec.get('alerts') else '❌ выкл'}  (/subscribe · /unsubscribe)\n"
-                f"📅 Ежедневная сводка: {'✅ вкл' if rec.get('daily') else '❌ выкл'} в {tm}  (/daily)")
+        out = ("⚙️ Твои подписки\n\n"
+               f"🔔 Алерты: {'✅ вкл' if rec.get('alerts') else '❌ выкл'}  (/subscribe · /unsubscribe)\n"
+               f"📅 Ежедневная сводка: {'✅ вкл' if rec.get('daily') else '❌ выкл'} в {tm}  (/daily)")
+        if self._is_admin(chat):
+            out += "\n\n🔐 Ты админ — /admin для панели."
+        return out
+
+    # ------------------------------------------------------------------
+    # Admin panel (owner-only)
+    # ------------------------------------------------------------------
+
+    def _admin_only(self, chat) -> Optional[str]:
+        return None if self._is_admin(chat) else "⛔ Эта команда только для админа бота."
+
+    def _cmd_admin(self, arg, chat=None):
+        secret = (self._tgs().get("admin_secret") or "").strip()
+        arg = (arg or "").strip()
+        if arg and secret and arg == secret:
+            self._sub(chat, "admin", True)
+            return "✅ Готово — теперь ты админ бота. Набери /admin для панели."
+        if not self._is_admin(chat):
+            return ("⛔ Нет доступа.\n"
+                    "Если ты владелец — задай «Секрет админа» в настройках бота и пришли "
+                    "/admin <секрет>.")
+        n_alerts = len(self._subscribers("alerts"))
+        n_daily = len(self._subscribers("daily"))
+        return (
+            "🔐 Админ-панель\n\n"
+            "📡 /say <текст> — отправить в mesh (broadcast)\n"
+            "📢 /announce <текст> — объявление всем подписчикам\n"
+            "📊 /status — состояние бота\n"
+            "📤 /sendreport — разослать ежедневный отчёт сейчас\n"
+            "♻️ /restart — перезапустить бота\n\n"
+            f"👥 Подписчиков: 🔔 {n_alerts} · 📅 {n_daily}"
+        )
+
+    def _cmd_say(self, arg, chat=None):
+        deny = self._admin_only(chat)
+        if deny:
+            return deny
+        text = (arg or "").strip()
+        if not text:
+            return "Использование: /say <текст> — уйдёт в mesh (broadcast)."
+        if len(text) > 200:
+            text = text[:200]
+        try:
+            self._p["send_mesh"](text)
+        except Exception as exc:
+            return f"⚠️ Не удалось отправить: {exc}"
+        return f"📡 Отправлено в mesh:\n{text}"
+
+    def _cmd_announce(self, arg, chat=None):
+        deny = self._admin_only(chat)
+        if deny:
+            return deny
+        text = (arg or "").strip()
+        if not text:
+            return "Использование: /announce <текст> — уйдёт всем подписчикам в ЛС."
+        with self._subs_lock:
+            targets = list(self._subs.keys())
+        msg = f"📢 {text}"
+        for cid in targets:
+            self._send(cid, msg)
+        return f"📢 Объявление разослано ({len(targets)})."
+
+    def _cmd_status(self, _arg, chat=None):
+        deny = self._admin_only(chat)
+        if deny:
+            return deny
+        try:
+            s = self._p["bot_status"]() or {}
+        except Exception as exc:
+            return f"Статус недоступен: {exc}"
+        up = s.get("uptime_s") or 0
+        up_str = f"{up // 3600} ч {up % 3600 // 60} мин" if up >= 3600 else f"{up // 60} мин"
+        proxy = (f"через прокси · {s.get('proxy_ip')}" if s.get("proxy_via") else "напрямую")
+        return (
+            "📊 Состояние бота\n\n"
+            f"🏷 Версия: {s.get('version', '?')}\n"
+            f"⏱ Аптайм: {up_str}\n"
+            f"📡 Нода: {'🟢 на связи' if s.get('mesh_connected') else '🔴 нет связи'}"
+            f" · онлайн {s.get('nodes_online') or 0} / известно {s.get('nodes_known') or 0}\n"
+            f"🌐 Сеть: {proxy}\n"
+            f"👥 Подписчиков: 🔔 {len(self._subscribers('alerts'))} · 📅 {len(self._subscribers('daily'))}\n"
+            f"🤖 Обработано команд: {self._handled}"
+        )
+
+    def _cmd_restart(self, _arg, chat=None):
+        deny = self._admin_only(chat)
+        if deny:
+            return deny
+        try:
+            self._p["restart"]()
+        except Exception as exc:
+            return f"⚠️ Не удалось перезапустить: {exc}"
+        return "♻️ Перезапускаю бота… (вернусь через ~10 сек)"
+
+    def _cmd_sendreport(self, _arg, chat=None):
+        deny = self._admin_only(chat)
+        if deny:
+            return deny
+        report = self._daily_report()
+        subs = self._subscribers("daily")
+        for cid in subs:
+            self._send(cid, report)
+        # always show the admin a preview
+        self._send(chat, "👁 Превью:\n\n" + report)
+        return f"📤 Отчёт разослан подписчикам /daily ({len(subs)})."
 
     # ------------------------------------------------------------------
     # Delivery loop: alerts → subscribers, daily report

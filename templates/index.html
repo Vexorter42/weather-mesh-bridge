@@ -718,6 +718,9 @@
             <label>Время ежедневной сводки <small>(HH:MM, местное время малины) — уходит подписчикам /daily</small>
               <input type="time" id="tgsDailyTime" value="09:00">
             </label>
+            <label>Секрет админа <small>(для админ-панели в боте: пришли боту <code>/admin &lt;секрет&gt;</code> с этим значением, и ты станешь админом — команды <code>/say</code>, <code>/announce</code>, <code>/status</code>, <code>/sendreport</code>, <code>/restart</code>)</small>
+              <input type="text" id="tgsAdminSecret" placeholder="придумай секретное слово" autocomplete="off">
+            </label>
             <label class="toggle-row">
               <input type="checkbox" id="tgsShowWeather" checked>
               <span>Показывать погоду (температура, ощущение, влажность, ветер)</span>

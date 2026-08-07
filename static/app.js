@@ -3425,6 +3425,7 @@ async function saveTgStatusConfig() {
       auto_pin:        $("#tgsAutoPin").checked,
       commands_enabled: $("#tgsCommandsEnabled").checked,
       daily_time:      $("#tgsDailyTime").value || "09:00",
+      admin_secret:    $("#tgsAdminSecret").value.trim(),
       show_weather:    $("#tgsShowWeather").checked,
       show_mesh_stats: $("#tgsShowMesh").checked,
       extra_text:      $("#tgsExtra").value.trim(),
@@ -3465,6 +3466,7 @@ async function refreshTgStatusBot() {
   if (typeof c.auto_pin === "boolean")  $("#tgsAutoPin").checked = c.auto_pin;
   if (typeof c.commands_enabled === "boolean") $("#tgsCommandsEnabled").checked = c.commands_enabled;
   if (c.daily_time && $("#tgsDailyTime")) $("#tgsDailyTime").value = c.daily_time;
+  if (c.admin_secret != null && $("#tgsAdminSecret") && !$("#tgsAdminSecret").value) $("#tgsAdminSecret").value = c.admin_secret;
   if (typeof c.show_weather === "boolean") $("#tgsShowWeather").checked = c.show_weather;
   if (typeof c.show_mesh_stats === "boolean") $("#tgsShowMesh").checked = c.show_mesh_stats;
   if (c.extra_text && !$("#tgsExtra").value) $("#tgsExtra").value = c.extra_text;

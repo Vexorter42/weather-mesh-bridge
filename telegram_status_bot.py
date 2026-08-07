@@ -40,6 +40,8 @@ DEFAULTS = {
     "auto_pin": True,         # try to pin the message on first send
     "commands_enabled": False,  # answer /commands in DMs/chats (telegram_command_bot)
     "daily_time": "09:00",      # HH:MM (Pi local time) to send the /daily digest
+    "admin_secret": "",         # /admin <secret> promotes the caller to bot admin
+    "admin_ids": [],            # Telegram user ids that are always admin (optional)
     # Proxy URL — usually same as in telegram bridge config. Empty = direct.
     "proxy": "",
     # Persisted state (filled by the worker, don't edit by hand)
