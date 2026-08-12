@@ -182,6 +182,7 @@ class MeshCoreBridge:
             log.info("MeshCore bridge connected on %s @ %d", dev, baud)
             await self._load_channels()
             await self._subscribe_incoming()
+            await self._load_contacts()
         except Exception as exc:
             self._connected = False
             self._last_error = str(exc)
@@ -256,7 +257,8 @@ class MeshCoreBridge:
         # Route length: path_len is the hop count (255 = direct/heard first-hand).
         pl = payload.get("path_len")
         hops = 0 if pl in (None, 255) else int(pl)
-        meta = {"hops_taken": hops, "from_id": sender or None}
+        meta = {"hops_taken": hops, "from_id": sender or None,
+                "route_path": self._route_for(sender)}
         loop = asyncio.get_running_loop()
         try:
             reply = await loop.run_in_executor(None, self._command_handler, body, chan, meta)
@@ -266,7 +268,41 @@ class MeshCoreBridge:
         if reply:
             await asyncio.sleep(1.5)          # small back-off so the channel clears
             r = await self._send_coro(reply, chan)
-            log.info("MeshCore cmd %r hops=%s on chan=%s -> sent=%s", body[:40], hops, chan, r.get("ok"))
+            log.info("MeshCore cmd %r hops=%s route=%s chan=%s -> sent=%s",
+                     body[:40], hops, meta.get("route_path"), chan, r.get("ok"))
+
+    async def _load_contacts(self) -> None:
+        """Populate the contact cache so we can look up a sender's stored route."""
+        if self._mc is None:
+            return
+        try:
+            maybe = self._mc.ensure_contacts()
+            if inspect.isawaitable(maybe):
+                await maybe
+            log.info("MeshCore contacts loaded: %d", len(getattr(self._mc, "_contacts", {}) or {}))
+        except Exception:
+            log.debug("MeshCore: ensure_contacts failed", exc_info=True)
+
+    def _route_for(self, sender: str) -> Optional[list[str]]:
+        """The known route (list of hop-hash hex strings) to `sender`, read from
+        the contact's stored out_path. None if the sender isn't a known contact
+        or the node has no learned path (heard directly)."""
+        if not sender or self._mc is None:
+            return None
+        try:
+            c = self._mc.get_contact_by_name(sender)
+        except Exception:
+            log.debug("MeshCore route: lookup failed", exc_info=True)
+            return None
+        if not c:
+            return None
+        hexs = (c.get("out_path") or "").strip()
+        n = int(c.get("out_path_len") or 0)
+        if not hexs or n <= 0:                            # -1 = flood (no fixed path)
+            return None
+        step = max(2, len(hexs) // n)                     # hex chars per hop hash
+        hops = [hexs[i:i + step] for i in range(0, len(hexs), step) if hexs[i:i + step]]
+        return hops[:n] or None
 
     def _resolve_chan(self) -> int:
         """Configured channel_name → index (from the Companion table); fall back
