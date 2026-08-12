@@ -37,6 +37,7 @@ import mqtt_publisher
 from chat_db import ChatDb
 from history_db import HistoryDb
 from meshbridge import MeshBridge
+from meshcore_bridge import MeshCoreBridge, DEFAULTS as MESHCORE_DEFAULTS
 import llm
 from telegram_bridge import DEFAULTS as TG_DEFAULTS, TELETHON_AVAILABLE, TelegramBridge
 from telegram_status_bot import DEFAULTS as TGS_DEFAULTS, TelegramStatusBot
@@ -48,7 +49,7 @@ logging.basicConfig(
 )
 log = logging.getLogger("weather-mesh-bridge")
 
-VERSION = "2.13.0"
+VERSION = "2.14.0"
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "config.json"
@@ -72,6 +73,7 @@ PROXY_DEFAULTS = {
     "exit_name": "",
     "managed": False,
     "auto_switch": False,
+    "avoid_ru": True,      # never pick a Russian exit during auto-switch
 }
 
 SUB_CACHE_PATH = BASE_DIR / "xray_sub.txt"   # decoded subscription (has UUIDs, gitignored)
@@ -210,6 +212,7 @@ def load_config() -> dict[str, Any]:
             "alerts": dict(weather_alerts.DEFAULTS),
             "nowcast": dict(rain_nowcast.DEFAULTS),
             "mqtt": dict(mqtt_publisher.DEFAULTS),
+            "meshcore": dict(MESHCORE_DEFAULTS),
             "schedules": [],
             "telegram": dict(TG_DEFAULTS),
             "telegram_status": dict(TGS_DEFAULTS),
@@ -360,6 +363,41 @@ def _on_packet(ts, portnum, from_num):
 BRIDGE.set_packet_callback(_on_packet)
 
 
+# --- MeshCore mirror: broadcasts also go into a MeshCore network (USB serial) ---
+MESHCORE = MeshCoreBridge(load_config)
+
+
+def _mirror_to_meshcore(text: str, _channel_index: int) -> None:
+    """MeshBridge mirror hook — fire the same broadcast into MeshCore.
+
+    We ignore the Meshtastic channel index: MeshCore is a separate network with
+    its own channel table, so we always use the configured MeshCore channel.
+    Fire-and-forget so mirroring never adds latency to the Meshtastic path.
+    """
+    try:
+        if MESHCORE.status().get("enabled"):
+            MESHCORE.send_channel(text)
+    except Exception:
+        log.exception("MeshCore mirror failed")
+
+
+def _handle_meshcore_command(text: str, channel_index: int,
+                             meta: Optional[dict[str, Any]] = None) -> Optional[str]:
+    """Command handler for incoming MeshCore channel messages (!ping, !w, …).
+    Reuses the same registry as the Meshtastic side; the reply goes back to the
+    same MeshCore channel. `meta` carries hops_taken (route length) + from_id."""
+    cfg = load_config()
+    if not bool((cfg.get("commands") or {}).get("enabled", True)):
+        return None
+    msg = {"text": text, **(meta or {})}
+    return commands.handle(msg, bridge=BRIDGE, cfg=cfg)
+
+
+BRIDGE.set_mirror_callback(_mirror_to_meshcore)
+MESHCORE.set_command_handler(_handle_meshcore_command)
+MESHCORE.start()
+
+
 def _start_stats_flusher(interval_seconds: int = 45) -> threading.Thread:
     def loop():
         time.sleep(30)
@@ -394,6 +432,7 @@ def _telegram_forward(text: str, channel_index: int, destination: str) -> None:
         channel_index=int(channel_index if channel_index is not None else mesh_cfg.get("channel_index", 0)),
         destination=destination or mesh_cfg.get("destination") or "broadcast",
         chunk_delay=_chunk_delay(mesh_cfg),
+        mirror=False,   # Telegram-forwarded alerts are not mirrored into MeshCore
     )
 
 
@@ -1025,6 +1064,8 @@ def api_set_config():
             cfg["nowcast"] = {**rain_nowcast.DEFAULTS, **(cfg.get("nowcast") or {}), **payload["nowcast"]}
         if "mqtt" in payload:
             cfg["mqtt"] = {**mqtt_publisher.DEFAULTS, **(cfg.get("mqtt") or {}), **payload["mqtt"]}
+        if "meshcore" in payload:
+            cfg["meshcore"] = {**MESHCORE_DEFAULTS, **(cfg.get("meshcore") or {}), **payload["meshcore"]}
         if "telegram" in payload:
             cfg["telegram"] = {**TG_DEFAULTS, **(cfg.get("telegram") or {}), **payload["telegram"]}
         if "telegram_status" in payload:
@@ -1151,16 +1192,33 @@ def _start_autobackup(interval_seconds: int = 86400, keep: int = 14) -> threadin
 _start_autobackup()
 
 
+# Markers (flag emoji / city / country names) that identify a Russian exit, so
+# auto-switch can skip them. Purely for proxy geo-selection.
+_RU_EXIT_MARKERS = ("🇷🇺", "russia", "россия", "москва", "moscow",
+                    "санкт", "петербург", "spb", "россия")
+
+
+def _is_ru_exit(e: dict[str, Any]) -> bool:
+    name = (e.get("name") or "").lower()
+    return any(m.lower() in name for m in _RU_EXIT_MARKERS)
+
+
 def _rotate_proxy_exit() -> None:
-    """Switch the managed Xray tunnel to the next exit in the subscription."""
+    """Switch the managed Xray tunnel to the next exit in the subscription.
+    Skips Russian exits when proxy.avoid_ru is on (the default)."""
     if not SUB_CACHE_PATH.exists():
         return
     exits = proxy_manager.public_exits(proxy_manager.parse_exits(
         SUB_CACHE_PATH.read_text(encoding="utf-8")))
     if not exits:
         return
+    p = load_config().get("proxy") or {}
+    if p.get("avoid_ru", True):
+        non_ru = [e for e in exits if not _is_ru_exit(e)]
+        if non_ru:                       # keep all only if every exit is Russian
+            exits = non_ru
     idxs = [e["index"] for e in exits]
-    cur = (load_config().get("proxy") or {}).get("exit_index")
+    cur = p.get("exit_index")
     pos = idxs.index(cur) if cur in idxs else -1
     nxt = idxs[(pos + 1) % len(idxs)]
     full = proxy_manager.parse_exits(SUB_CACHE_PATH.read_text(encoding="utf-8"))
@@ -1205,6 +1263,59 @@ def _start_proxy_autoswitch(interval_seconds: int = 300) -> threading.Thread:
 
 
 _start_proxy_autoswitch()
+
+
+def _refresh_subscription() -> Optional[int]:
+    """Re-fetch the subscription by its saved URL and refresh the cached exit
+    list. If a managed exit is active, re-apply it (matched by name, then index)
+    so rotated UUIDs don't break the tunnel. Returns the exit count, or None."""
+    url = ((load_config().get("proxy") or {}).get("subscription_url") or "").strip()
+    if not url:
+        return None
+    decoded = proxy_manager.fetch_subscription(url)
+    SUB_CACHE_PATH.write_text(decoded, encoding="utf-8")
+    full = proxy_manager.parse_exits(decoded)
+    pub = proxy_manager.public_exits(full)
+    p = load_config().get("proxy") or {}
+    if p.get("managed") and pub:
+        name, idx = p.get("exit_name") or "", p.get("exit_index")
+        match = next((e for e in full if e.get("name") == name
+                      and e.get("uri", "").startswith("vless://")), None)
+        if not match:
+            match = next((e for e in full if e["index"] == idx), None)
+        if match:
+            try:
+                proxy_manager.apply_exit(match["uri"])
+                with _cfg_lock:
+                    c = load_config()
+                    c["proxy"] = {**PROXY_DEFAULTS, **(c.get("proxy") or {})}
+                    c["proxy"].update(exit_index=match["index"], exit_name=match.get("name") or "")
+                    save_config(c)
+            except Exception:
+                log.exception("re-apply exit after subscription refresh failed")
+    log.info("Subscription refreshed: %d exits", len(pub))
+    return len(pub)
+
+
+def _start_proxy_sub_updater(interval_seconds: int = 12 * 3600) -> threading.Thread:
+    """Refresh the Xray subscription by its key every 12h so exit lists and
+    rotated UUIDs stay current."""
+    def loop():
+        time.sleep(300)                  # let startup settle before the first pull
+        while True:
+            try:
+                if (load_config().get("proxy") or {}).get("subscription_url"):
+                    _refresh_subscription()
+            except Exception:
+                log.exception("subscription auto-refresh failed (will retry)")
+            time.sleep(interval_seconds)
+
+    t = threading.Thread(target=loop, daemon=True, name="proxy-sub-updater")
+    t.start()
+    return t
+
+
+_start_proxy_sub_updater()
 
 
 @app.route("/api/proxy/test", methods=["POST"])
@@ -1925,6 +2036,28 @@ def api_mqtt_test():
     payload = request.get_json(force=True, silent=True) or {}
     section = payload.get("mqtt") if "mqtt" in payload else (load_config().get("mqtt") or {})
     return jsonify(mqtt_publisher.test_connection(section))
+
+
+@app.route("/api/meshcore/status", methods=["GET"])
+def api_meshcore_status():
+    return jsonify(MESHCORE.status())
+
+
+@app.route("/api/meshcore/channels", methods=["GET"])
+def api_meshcore_channels():
+    """Channel table read from the Companion node (index → name)."""
+    refresh = request.args.get("refresh") in ("1", "true", "yes")
+    return jsonify({"channels": MESHCORE.channels(refresh=refresh)})
+
+
+@app.route("/api/meshcore/test", methods=["POST"])
+def api_meshcore_test():
+    """Send a test broadcast into MeshCore with the currently-saved settings."""
+    if not MESHCORE.status().get("enabled"):
+        return jsonify({"ok": False, "error": "MeshCore выключен — включи и сохрани"}), 400
+    payload = request.get_json(force=True, silent=True) or {}
+    text = (payload.get("text") or "🔧 Тест из weather-mesh-bridge").strip()
+    return jsonify(MESHCORE.send_channel(text, wait=True))
 
 
 @app.route("/api/stats", methods=["GET"])

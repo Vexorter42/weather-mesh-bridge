@@ -166,6 +166,9 @@ class MeshBridge:
         self._traffic: "collections.deque" = collections.deque(maxlen=300000)
         # Optional callback(ts, portnum, from_num) — app.py persists to history_db.
         self._pkt_callback: Optional[Callable] = None
+        # Optional callback(text, channel_index) fired on every *broadcast* send —
+        # app.py uses it to mirror the same text into a MeshCore network.
+        self._mirror_callback: Optional[Callable] = None
 
         # optional callback: gets the message dict, returns text to send back
         # (used for the !commands feature). Called in a background thread.
@@ -184,6 +187,11 @@ class MeshBridge:
 
     def set_packet_callback(self, fn) -> None:
         self._pkt_callback = fn
+
+    def set_mirror_callback(self, fn) -> None:
+        """fn(text, channel_index) — invoked once per broadcast (full, un-chunked
+        text) so app.py can mirror it into a MeshCore network."""
+        self._mirror_callback = fn
 
     def set_chat_db(self, db: Any) -> None:
         self._db = db
@@ -1367,12 +1375,22 @@ class MeshBridge:
         channel_index: int = 0,
         destination: str = "broadcast",
         chunk_delay: float = CHUNK_DELAY_SECONDS,
+        mirror: bool = True,
     ) -> dict:
         """Send text, splitting into multiple sendText calls if it exceeds MAX_TEXT_BYTES.
 
         Each chunk after splitting gets a "(i/N) " prefix so the receiver can
-        reassemble visually.
+        reassemble visually. Pass mirror=False to keep this broadcast out of the
+        MeshCore mirror (used for Telegram-forwarded alerts).
         """
+        # Mirror broadcasts (not direct messages) into MeshCore, if wired. Fire
+        # once with the full text — the MeshCore bridge does its own chunking.
+        if mirror and self._mirror_callback and (not destination or destination in ("broadcast", "^all")):
+            try:
+                self._mirror_callback(text, channel_index)
+            except Exception:
+                log.exception("mesh mirror callback failed")
+
         if _utf8_len(text) <= MAX_TEXT_BYTES:
             r = self.send_text(text, channel_index=channel_index, destination=destination)
             r["chunks"] = 1

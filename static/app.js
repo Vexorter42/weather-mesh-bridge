@@ -116,6 +116,8 @@ $$(".tab-btn").forEach(btn => {
       refreshLlmStatus();
       loadMqttConfig();
       refreshMqttStatus();
+      loadMeshcoreConfig();
+      refreshMeshcoreStatus();
     } else if (CURRENT_TAB === "system") {
       refreshHealth();
       refreshUpdateInfo();
@@ -2836,6 +2838,7 @@ async function init() {
   wireProxyPanel();
   wireNowcastPanel();
   wireMqttPanel();
+  wireMeshcorePanel();
 }
 
 // ---------- Радар-нокаст («дождь идёт к тебе») ----------
@@ -3007,6 +3010,118 @@ async function loadMqttConfig() {
 function setMqttStatus(kind, text) {
   const dot = $("#mqttStatus .tg-dot");
   const txt = $("#mqttStatusText");
+  if (dot) dot.className = `tg-dot tg-dot-${kind}`;
+  if (txt) txt.textContent = text;
+}
+
+// ---------- MeshCore mirror (USB serial) ----------
+function wireMeshcorePanel() {
+  $("#mcEnabled")?.addEventListener("change", async () => { await saveMeshcoreConfig(); refreshMeshcoreStatus(); });
+  $("#mcSave")?.addEventListener("click", async () => { await saveMeshcoreConfig(); toast(t("Сохранено"), "ok"); refreshMeshcoreStatus(); });
+  $("#mcRefresh")?.addEventListener("click", refreshMeshcoreChannels);
+  $("#mcTest")?.addEventListener("click", testMeshcore);
+}
+
+function _meshcoreFromInputs() {
+  return {
+    enabled:      $("#mcEnabled").checked,
+    port:         $("#mcPort").value.trim() || "auto",
+    baud:         Math.max(9600, parseInt($("#mcBaud").value, 10) || 115200),
+    channel_name: $("#mcChannelName") ? $("#mcChannelName").value : "",
+    chunk_delay:  Math.max(0, parseFloat($("#mcChunkDelay").value) || 8),
+  };
+}
+
+// Fill the channel <select> from the node's table, preserving the chosen name.
+function _fillMeshcoreChannels(channels, selected) {
+  const sel = $("#mcChannelName");
+  if (!sel) return;
+  const cur = selected != null ? selected : sel.value;
+  let html = `<option value="">— первый / публичный —</option>`;
+  let seen = false;
+  (channels || []).forEach(c => {
+    if (c.name === cur) seen = true;
+    html += `<option value="${escapeHtml(c.name)}">${escapeHtml(c.name)} (#${c.index})</option>`;
+  });
+  if (cur && !seen) html += `<option value="${escapeHtml(cur)}">${escapeHtml(cur)}</option>`;
+  sel.innerHTML = html;
+  sel.value = cur || "";
+}
+
+async function refreshMeshcoreChannels() {
+  try {
+    const r = await api("/api/meshcore/channels?refresh=1");
+    _fillMeshcoreChannels(r.channels, null);
+    toast(tf("Каналов найдено: {0}", (r.channels || []).length), "ok");
+  } catch (e) { toast(e.message, "err"); }
+}
+
+async function saveMeshcoreConfig() {
+  const meshcore = _meshcoreFromInputs();
+  try { await api("/api/config", { method: "POST", body: { meshcore } }); }
+  catch (e) { toast(e.message, "err"); }
+}
+
+async function refreshMeshcoreStatus() {
+  let s;
+  try { s = await api("/api/meshcore/status"); }
+  catch (e) { setMeshcoreStatus("err", t("Ошибка: ") + e.message); return; }
+  // Fill the detected-ports datalist for the picker.
+  const dl = $("#mcPortList");
+  if (dl) dl.innerHTML = (s.detected_ports || []).map(p => `<option value="${escapeHtml(p)}">`).join("");
+  // Populate the channel dropdown from the node table.
+  if (s.channels && s.channels.length) _fillMeshcoreChannels(s.channels, s.channel_name);
+  const chLabel = s.channel_name || `#${s.channel_index}`;
+  if (!s.available) {
+    setMeshcoreStatus("err", "библиотека meshcore не установлена на сервере");
+  } else if (!s.enabled) {
+    setMeshcoreStatus("idle", t("Выключен"));
+  } else if (s.connected) {
+    const last = s.last_sent_ts ? relTime(s.last_sent_ts) : "—";
+    setMeshcoreStatus("ok", tf("Подключён · {0} · канал {1} · отправок: {2} · последняя {3}",
+      s.resolved_port || s.port, chLabel, s.sent_count, last));
+  } else {
+    setMeshcoreStatus("warn", (s.last_error ? t("Ошибка: ") + s.last_error : t("Подключаюсь…")));
+  }
+  if ($("#mcEnabled")) $("#mcEnabled").checked = !!s.enabled;
+}
+
+async function testMeshcore() {
+  const out = $("#mcTestResult");
+  out.hidden = false; out.className = "tg-test-result";
+  out.innerHTML = `<span class="muted">⏳ ${t("Отправляю тест…")}</span>`;
+  try {
+    await saveMeshcoreConfig();   // persist first so the bridge uses fresh port/baud
+    const r = await api("/api/meshcore/test", { method: "POST", body: {} });
+    if (r.ok) {
+      out.className = "tg-test-result ok";
+      out.innerHTML = `✅ <strong>${t("Отправлено в MeshCore")}</strong>` + (r.chunks > 1 ? ` (${r.chunks} ч.)` : "");
+    } else {
+      out.className = "tg-test-result err";
+      out.innerHTML = `❌ ${escapeHtml(r.error || "?")}`;
+    }
+  } catch (e) {
+    out.className = "tg-test-result err";
+    out.innerHTML = `❌ ${escapeHtml(e.message)}`;
+  }
+  refreshMeshcoreStatus();
+}
+
+async function loadMeshcoreConfig() {
+  let cfg;
+  try { cfg = await api("/api/config"); }
+  catch { return; }
+  const m = cfg.meshcore || {};
+  if ($("#mcPort") && !$("#mcPort").value) $("#mcPort").value = m.port || "auto";
+  if ($("#mcBaud")) $("#mcBaud").value = m.baud || 115200;
+  if ($("#mcChunkDelay") && m.chunk_delay != null) $("#mcChunkDelay").value = m.chunk_delay;
+  if ($("#mcChannelName") && m.channel_name) _fillMeshcoreChannels([], m.channel_name);
+  if (typeof m.enabled === "boolean") $("#mcEnabled").checked = m.enabled;
+}
+
+function setMeshcoreStatus(kind, text) {
+  const dot = $("#mcStatus .tg-dot");
+  const txt = $("#mcStatusText");
   if (dot) dot.className = `tg-dot tg-dot-${kind}`;
   if (txt) txt.textContent = text;
 }

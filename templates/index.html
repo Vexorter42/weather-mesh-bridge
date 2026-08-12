@@ -893,6 +893,51 @@
             <div id="mqttTestResult" class="tg-test-result" hidden></div>
           </div>
         </details>
+
+        <details class="experiment" id="experimentMeshcore">
+          <summary>
+            <label class="toggle-row" onclick="event.stopPropagation();">
+              <input type="checkbox" id="mcEnabled">
+              <span><strong>MeshCore (зеркало)</strong> — дублирует каждый broadcast (погода, алерты, ручная отправка) во вторую mesh-сеть по протоколу MeshCore</span>
+            </label>
+          </summary>
+          <div class="experiment-body">
+            <p class="hint">
+              Всё, что уходит в Meshtastic-эфир, параллельно уйдёт и в MeshCore. Нужна <strong>Companion</strong>-нода,
+              воткнутая в малину по USB. Лимит сообщения — <strong>143 байта</strong> (≈143 символа латиницей, ~67 кириллицей),
+              длинное режется на части «(i/N)». Канал — индекс в таблице каналов ноды (0 — обычно публичный).
+            </p>
+
+            <div class="tg-status" id="mcStatus">
+              <span class="tg-dot tg-dot-idle"></span>
+              <span id="mcStatusText">Загружаю состояние…</span>
+            </div>
+
+            <div class="profile-section">Companion-нода (USB)</div>
+            <div class="grid2">
+              <label>Порт <small>(auto — сам найдёт /dev/ttyACM* или ttyUSB*)</small>
+                <input type="text" id="mcPort" placeholder="auto" list="mcPortList">
+                <datalist id="mcPortList"></datalist>
+              </label>
+              <label>Скорость (baud)
+                <input type="number" id="mcBaud" min="9600" max="921600" step="100" value="115200">
+              </label>
+              <label>Канал <small>(названия подтягиваются с ноды)</small>
+                <select id="mcChannelName"><option value="">— первый / публичный —</option></select>
+              </label>
+              <label>Пауза между частями, сек <small>(длинные сообщения бьются на части)</small>
+                <input type="number" id="mcChunkDelay" min="0" max="30" step="0.5" value="8">
+              </label>
+            </div>
+
+            <div class="row">
+              <button id="mcSave">💾 Сохранить</button>
+              <button id="mcTest" class="ghost">📡 Тест-отправка</button>
+              <button id="mcRefresh" class="ghost">↻ Обновить каналы</button>
+            </div>
+            <div id="mcTestResult" class="tg-test-result" hidden></div>
+          </div>
+        </details>
     </div>
 
     <!-- =================== СИСТЕМА =================== -->
