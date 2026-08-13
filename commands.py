@@ -129,20 +129,13 @@ def _hops_phrase(n: Optional[int]) -> str:
     return f"↯ {n} {word}"
 
 
-@command("ping", help_text="/ping — проверка связи (отвечает pong + маршрут)")
+@command("ping", help_text="/ping — проверка связи (отвечает pong + кол-во hops)")
 def cmd_ping(args, msg, bridge, cfg):
     time_str = datetime.now().strftime("%H:%M")
     parts = [f"pong · {time_str}"]
-    # MeshCore fills route_path with the hop-hash chain to the sender (from the
-    # contact's stored route); Meshtastic only knows the hop count.
-    route = msg.get("route_path")
-    if route:
-        cnt = _hops_phrase(len(route)).replace("↯ ", "")   # "3 прыжка"
-        parts.append(f"↯ {' → '.join(route)} ({cnt})")
-    else:
-        hp = _hops_phrase(msg.get("hops_taken"))
-        if hp:
-            parts.append(hp)
+    hp = _hops_phrase(msg.get("hops_taken"))
+    if hp:
+        parts.append(hp)
     # Note if the request reached us via an MQTT gateway (internet) rather
     # than purely over LoRa RF.
     if msg.get("via_mqtt"):

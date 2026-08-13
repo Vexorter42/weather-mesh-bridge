@@ -24,6 +24,7 @@ budget and prefix multi-part messages with "(i/N) ".
 from __future__ import annotations
 
 import asyncio
+import collections
 import glob
 import inspect
 import logging
@@ -83,6 +84,10 @@ class MeshCoreBridge:
         self._channels: list[dict] = []       # [{index, name}] read from the Companion
         self._command_handler: Optional[Callable[..., Optional[str]]] = None
         self._rx_count = 0
+        # Recent RF-log paths (recv_ts, hops[]) for text packets — used to show
+        # the real route of an incoming command. Populated only when the
+        # Companion has RF logging enabled (emits RX_LOG_DATA frames).
+        self._rxlog_buf: "collections.deque" = collections.deque(maxlen=40)
         self._last_error: Optional[str] = None
         self._sent_count = 0
         self._last_sent_ts = 0.0
@@ -176,6 +181,10 @@ class MeshCoreBridge:
                 log.warning("MeshCore: no response from %s", dev)
                 return
             self._mc = mc
+            try:
+                mc.auto_update_contacts = True    # keep the contact cache fresh on new adverts
+            except Exception:
+                pass
             self._resolved_port = dev
             self._connected = bool(getattr(mc, "is_connected", True))
             self._last_error = None
@@ -226,9 +235,38 @@ class MeshCoreBridge:
             if inspect.isawaitable(maybe):
                 await maybe
             self._mc.subscribe(EventType.CHANNEL_MSG_RECV, self._on_channel_msg)
+            try:
+                self._mc.subscribe(EventType.RX_LOG_DATA, self._on_rx_log)
+            except Exception:
+                log.debug("MeshCore: RX_LOG subscribe failed", exc_info=True)
             log.info("MeshCore: listening for channel messages")
         except Exception:
             log.exception("MeshCore: failed to subscribe to incoming messages")
+
+    def _on_rx_log(self, event) -> None:
+        # Raw RX-log frames carry the full flood path — but only if the Companion
+        # firmware has RF logging enabled (standard builds don't emit these).
+        # We buffer paths of text packets and match them to incoming commands.
+        try:
+            p = getattr(event, "payload", None) or {}
+            ptype = (p.get("payload_typename") or "")
+            if "TXT" not in ptype.upper():
+                return
+            hops = self._hex_to_hops((p.get("path") or "").strip(),
+                                     int(p.get("path_len") or 0))
+            self._rxlog_buf.append((time.time(), hops))
+        except Exception:
+            pass
+
+    def _rxlog_route(self, ts: float, window: float = 4.0) -> Optional[list[str]]:
+        """Route (hop list) of the buffered text packet nearest to `ts`. Empty
+        list = heard directly (0 hops); None = no RF-log data available."""
+        best, best_dt = None, window
+        for rt, hops in reversed(self._rxlog_buf):
+            dt = abs(rt - ts)
+            if dt <= best_dt:
+                best, best_dt = hops, dt
+        return best
 
     def _on_channel_msg(self, event) -> None:
         # subscribe callback runs in the loop thread — spawn a task so a slow
@@ -252,13 +290,32 @@ class MeshCoreBridge:
             sender, body = "", raw
         if not body or not (body.startswith("!") or body.startswith("/")):
             return
+        # MeshCore-specific: !trace <node> actively discovers the route (path
+        # discovery). Handled here (not via the shared registry) since it needs
+        # the MeshCore node; also warms up out_path so !ping shows hops after.
+        parts = body.lstrip("!/ ").split()
+        if parts and parts[0].lower() in ("trace", "path", "путь", "трейс"):
+            log.info("MeshCore trace %r on chan=%s", body[:40], chan)
+            try:
+                await self._handle_trace(parts[1:], chan, sender)
+            except Exception:
+                log.exception("MeshCore trace failed")
+            return
         if not self._command_handler:
             return
-        # Route length: path_len is the hop count (255 = direct/heard first-hand).
-        pl = payload.get("path_len")
-        hops = 0 if pl in (None, 255) else int(pl)
-        meta = {"hops_taken": hops, "from_id": sender or None,
-                "route_path": self._route_for(sender)}
+        # Prefer the real per-packet path from the RF log (if RF logging is on):
+        # give the paired RX_LOG frame a moment to arrive, then match by time.
+        cmd_ts = time.time()
+        await asyncio.sleep(0.7)
+        rx_route = self._rxlog_route(cmd_ts)
+        if rx_route is not None:
+            hops = len(rx_route)                          # authoritative from RF log
+            route_path = rx_route                         # [] = heard directly
+        else:                                             # no RF-log data — fall back
+            pl = payload.get("path_len")
+            hops = 0 if pl in (None, 255) else int(pl)
+            route_path = self._route_for(sender)
+        meta = {"hops_taken": hops, "from_id": sender or None, "route_path": route_path}
         loop = asyncio.get_running_loop()
         try:
             reply = await loop.run_in_executor(None, self._command_handler, body, chan, meta)
@@ -267,9 +324,18 @@ class MeshCoreBridge:
             return
         if reply:
             await asyncio.sleep(1.5)          # small back-off so the channel clears
-            r = await self._send_coro(reply, chan)
+            mention = self._mention(sender)
+            r = await self._send_coro(mention + reply, chan)
             log.info("MeshCore cmd %r hops=%s route=%s chan=%s -> sent=%s",
-                     body[:40], hops, meta.get("route_path"), chan, r.get("ok"))
+                     body[:40], hops, route_path, chan, r.get("ok"))
+            # For ping, follow up with the route as a second message (like the
+            # reference bot) — only when the packet took hops.
+            if parts and parts[0].lower() == "ping" and route_path:
+                await asyncio.sleep(3)        # short gap between the two messages
+                chain = " → ".join(route_path)
+                n = len(route_path)
+                await self._send_coro(
+                    f"Путь: {chain} ({n} {self._hop_word(n)})", chan)
 
     async def _load_contacts(self) -> None:
         """Populate the contact cache so we can look up a sender's stored route."""
@@ -300,9 +366,88 @@ class MeshCoreBridge:
         n = int(c.get("out_path_len") or 0)
         if not hexs or n <= 0:                            # -1 = flood (no fixed path)
             return None
-        step = max(2, len(hexs) // n)                     # hex chars per hop hash
+        return self._hex_to_hops(hexs, n) or None
+
+    @staticmethod
+    def _mention(sender: str) -> str:
+        """MeshCore reply/mention prefix — replies look like '@[Name] text'."""
+        return f"@[{sender}] " if sender else ""
+
+    @staticmethod
+    def _hop_word(n: int) -> str:
+        d, dd = n % 10, n % 100
+        if d == 1 and dd != 11:
+            return "прыжок"
+        if 2 <= d <= 4 and not (12 <= dd <= 14):
+            return "прыжка"
+        return "прыжков"
+
+    @staticmethod
+    def _hex_to_hops(hexs: str, n: int) -> list[str]:
+        """Split a concatenated path-hash hex string into `n` hop tokens."""
+        hexs = (hexs or "").strip()
+        if not hexs or n <= 0:
+            return []
+        step = max(2, len(hexs) // n)
         hops = [hexs[i:i + step] for i in range(0, len(hexs), step) if hexs[i:i + step]]
-        return hops[:n] or None
+        return hops[:n]
+
+    def _find_contact(self, name: str):
+        """Contact by exact adv_name, then a loose case-insensitive substring."""
+        if self._mc is None or not name:
+            return None
+        try:
+            c = self._mc.get_contact_by_name(name)
+        except Exception:
+            c = None
+        if c:
+            return c
+        q = name.lower()
+        for v in (getattr(self._mc, "_contacts", {}) or {}).values():
+            if q in (v.get("adv_name") or "").lower():
+                return v
+        return None
+
+    @staticmethod
+    def _split_hops(hexs: str, n: int, hash_len: int) -> list[str]:
+        if not hexs or n <= 0:
+            return []
+        step = max(2, int(hash_len) * 2)
+        hops = [hexs[i:i + step] for i in range(0, len(hexs), step) if hexs[i:i + step]]
+        return hops[:n]
+
+    async def _handle_trace(self, args: list[str], chan: int, sender: str = "") -> None:
+        """!trace <node> — run MeshCore path discovery and report the route."""
+        m = self._mention(sender)
+        name = " ".join(args).strip()
+        if not name:
+            await self._send_coro(f"{m}Использование: !trace <имя узла>", chan)
+            return
+        contact = self._find_contact(name)
+        if not contact:
+            await self._send_coro(f"{m}Узел «{name}» не найден в контактах ноды.", chan)
+            return
+        disp = contact.get("adv_name") or name
+        await self._send_coro(f"{m}🛰 Ищу маршрут до {disp}…", chan)
+        hops = None
+        try:
+            ev = await self._mc.commands.send_path_discovery_sync(contact, min_timeout=20)
+            if ev and not (EventType is not None and getattr(ev, "type", None) == EventType.ERROR):
+                p = getattr(ev, "payload", None) or {}
+                hops = self._split_hops((p.get("out_path") or "").strip(),
+                                        int(p.get("out_path_len") or 0),
+                                        int(p.get("out_path_hash_len") or 1)) or None
+        except Exception as exc:
+            log.info("MeshCore trace error: %s", exc)
+        # Fallback: the discovery may have updated the contact's stored route even
+        # if no PATH_RESPONSE came back synchronously (auto_update_contacts).
+        if not hops:
+            hops = self._route_for(disp)
+        if hops:
+            await self._send_coro(
+                f"{m}🛣 {disp}: {' → '.join(hops)} ({len(hops)} {self._hop_word(len(hops))})", chan)
+        else:
+            await self._send_coro(f"{m}🛣 {disp}: маршрут не найден (нода не ответила на trace)", chan)
 
     def _resolve_chan(self) -> int:
         """Configured channel_name → index (from the Companion table); fall back
