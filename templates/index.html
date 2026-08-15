@@ -970,7 +970,14 @@
               <label>ID темы <small>(только для групп с темами/форумом; пусто — General)</small>
                 <input type="text" id="mcRelayTopic" placeholder="напр. 2">
               </label>
+              <label>Канал для теста <code>!t</code> <small>(из группы напиши <code>!t</code> или <code>/t</code> → тест в этот MeshCore-канал, не чаще 1/мин; пусто — выкл. Для <code>!t</code> у бота выключи privacy в @BotFather)</small>
+                <input type="text" id="mcRelayTestChannel" placeholder="#connection">
+              </label>
             </div>
+            <label class="toggle-row">
+              <input type="checkbox" id="mcRelayPin">
+              <span>Закреплённое сообщение со <strong>статистикой</strong> в теме (узлы региона, компаньон, счётчик пересылок; обновляется ~5 мин)</span>
+            </label>
 
             <div class="row">
               <button id="mcSave">💾 Сохранить</button>

@@ -71,6 +71,9 @@ DEFAULTS = {
     # Link template for the node name; {pubkey}/{region} filled in (name→pubkey
     # resolved via meshcoretel adverts). "" = no link.
     "tg_relay_node_url": "https://meshcoretel.ru/ru/{region}/adverts?pubkey={pubkey}",
+    "tg_relay_test_channel": "",  # MeshCore channel for the !t test from Telegram ("" = off)
+    "tg_relay_pin_enabled": False,  # maintain a pinned stats message in the relay topic
+    "tg_relay_pin_msg_id": None,    # persisted message_id of that pinned message
 }
 
 MAX_CHANNELS = 16           # how many channel slots to probe on the Companion
@@ -588,6 +591,14 @@ class MeshCoreBridge:
             return {"ok": False, "error": f"канал «{name}» не найден"}
         return self.send_channel(text, channel_index=idx)
 
+    def send_named(self, channel_name: str, text: str, wait: bool = False) -> dict:
+        """Send `text` to a channel by name (or the default channel if empty)."""
+        name = (channel_name or "").strip()
+        idx = self._chan_index_by_name(name) if name else self._resolve_chan()
+        if idx is None:
+            return {"ok": False, "error": f"канал «{name}» не найден"}
+        return self.send_channel(text, channel_index=idx, wait=wait)
+
     def channels(self, refresh: bool = False) -> list[dict]:
         """Cached channel table [{index, name}]. refresh=True re-reads the node."""
         if refresh and self._loop and self._connected:
@@ -618,6 +629,8 @@ class MeshCoreBridge:
             "tg_relay_topic_id": c.get("tg_relay_topic_id") or "",
             "tg_relay_source": c.get("tg_relay_source") or "companion",
             "tg_relay_region": c.get("tg_relay_region") or "",
+            "tg_relay_test_channel": c.get("tg_relay_test_channel") or "",
+            "tg_relay_pin_enabled": bool(c.get("tg_relay_pin_enabled")),
             "channels": list(self._channels),
             "detected_ports": self.list_ports(),
             "sent_count": self._sent_count,

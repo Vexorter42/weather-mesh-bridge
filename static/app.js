@@ -3045,6 +3045,8 @@ function _meshcoreFromInputs() {
     tg_relay_topic_id: $("#mcRelayTopic") ? $("#mcRelayTopic").value.trim() : "",
     tg_relay_source: $("#mcRelaySource") ? $("#mcRelaySource").value : "companion",
     tg_relay_region: $("#mcRelayRegion") ? $("#mcRelayRegion").value.trim() : "",
+    tg_relay_test_channel: $("#mcRelayTestChannel") ? $("#mcRelayTestChannel").value.trim() : "",
+    tg_relay_pin_enabled: $("#mcRelayPin") ? $("#mcRelayPin").checked : false,
   };
 }
 
@@ -3122,6 +3124,8 @@ async function refreshMeshcoreStatus() {
   if ($("#mcRelayAll")) { $("#mcRelayAll").checked = !(s.tg_relay_channels && s.tg_relay_channels.length); _toggleRelayChannel(); }
   if ($("#mcRelaySource") && s.tg_relay_source) $("#mcRelaySource").value = s.tg_relay_source;
   if ($("#mcRelayRegion") && !$("#mcRelayRegion").value && s.tg_relay_region) $("#mcRelayRegion").value = s.tg_relay_region;
+  if ($("#mcRelayTestChannel") && !$("#mcRelayTestChannel").value && s.tg_relay_test_channel) $("#mcRelayTestChannel").value = s.tg_relay_test_channel;
+  if ($("#mcRelayPin")) $("#mcRelayPin").checked = !!s.tg_relay_pin_enabled;
   const chLabel = s.channel_name || `#${s.channel_index}`;
   if (!s.available) {
     setMeshcoreStatus("err", "библиотека meshcore не установлена на сервере");
@@ -3176,6 +3180,8 @@ async function loadMeshcoreConfig() {
   if ($("#mcRelayAll") && typeof m.tg_relay_enabled === "boolean") { $("#mcRelayAll").checked = !(m.tg_relay_channels && m.tg_relay_channels.length); _toggleRelayChannel(); }
   if ($("#mcRelaySource") && m.tg_relay_source) $("#mcRelaySource").value = m.tg_relay_source;
   if ($("#mcRelayRegion") && !$("#mcRelayRegion").value && m.tg_relay_region) $("#mcRelayRegion").value = m.tg_relay_region;
+  if ($("#mcRelayTestChannel") && !$("#mcRelayTestChannel").value && m.tg_relay_test_channel) $("#mcRelayTestChannel").value = m.tg_relay_test_channel;
+  if ($("#mcRelayPin") && typeof m.tg_relay_pin_enabled === "boolean") $("#mcRelayPin").checked = m.tg_relay_pin_enabled;
 }
 
 function setMeshcoreStatus(kind, text) {

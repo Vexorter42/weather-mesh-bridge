@@ -52,7 +52,7 @@ logging.basicConfig(
 )
 log = logging.getLogger("weather-mesh-bridge")
 
-VERSION = "2.15.0"
+VERSION = "2.15.1"
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "config.json"
@@ -396,36 +396,69 @@ def _handle_meshcore_command(text: str, channel_index: int,
     return commands.handle(msg, bridge=BRIDGE, cfg=cfg)
 
 
-_ADVERTS_CACHE: dict[str, Any] = {"ts": 0.0, "region": "", "map": {}}
+_ADVERTS_CACHE: dict[str, Any] = {"ts": 0.0, "region": "", "map": {}, "items": []}
+_RELAY_COUNT = {"n": 0}
+
+
+def _refresh_adverts(region: str) -> None:
+    """Refresh the cached meshcoretel adverts (nodes) for a region (~10 min TTL)."""
+    region = (region or "").strip()
+    if not region:
+        return
+    now = time.time()
+    if now - _ADVERTS_CACHE["ts"] <= 600 and _ADVERTS_CACHE["region"] == region:
+        return
+    try:
+        r = requests.get(
+            "https://meshcoretel.ru/api/adverts",
+            params={"region_code": region, "limit": 2000},
+            headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"},
+            timeout=15,
+        )
+        items = r.json() if r is not None else []
+        if not isinstance(items, list):
+            items = []
+        m: dict[str, str] = {}
+        for it in items:
+            nm = (it.get("name") or "").strip().lower()
+            pk = it.get("public_key_hex")
+            if nm and pk:
+                m.setdefault(nm, pk)
+        _ADVERTS_CACHE.update(ts=now, region=region, map=m, items=items)
+    except Exception:
+        log.debug("meshcoretel adverts fetch failed", exc_info=True)
 
 
 def _meshcoretel_pubkey(name: str, region: str) -> Optional[str]:
-    """Resolve a MeshCore node name → its public key via meshcoretel's adverts
-    API (cached ~10 min), for building a node-page link. None if unknown."""
+    """Resolve a MeshCore node name → its public key (for a node-page link)."""
     name = (name or "").strip()
-    region = (region or "").strip()
-    if not name or not region:
+    if not name or not (region or "").strip():
         return None
-    now = time.time()
-    if now - _ADVERTS_CACHE["ts"] > 600 or _ADVERTS_CACHE["region"] != region:
-        try:
-            r = requests.get(
-                "https://meshcoretel.ru/api/adverts",
-                params={"region_code": region, "limit": 2000},
-                headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"},
-                timeout=15,
-            )
-            items = r.json() if r is not None else []
-            m: dict[str, str] = {}
-            for it in items:
-                nm = (it.get("name") or "").strip().lower()
-                pk = it.get("public_key_hex")
-                if nm and pk:
-                    m.setdefault(nm, pk)
-            _ADVERTS_CACHE.update(ts=now, region=region, map=m)
-        except Exception:
-            log.debug("meshcoretel adverts fetch failed", exc_info=True)
+    _refresh_adverts(region)
     return _ADVERTS_CACHE["map"].get(name.lower())
+
+
+def _meshcoretel_region_stats(region: str) -> dict[str, int]:
+    """Node counts for a region from the adverts cache."""
+    _refresh_adverts(region)
+    items = _ADVERTS_CACHE["items"]
+    now = time.time()
+    total = len(items)
+    rep = chat = online = 0
+    for it in items:
+        if it.get("is_repeater"):
+            rep += 1
+        if it.get("is_chat_node"):
+            chat += 1
+        ls = it.get("last_seen_at")
+        if ls:
+            try:
+                t = datetime.fromisoformat(ls.replace("Z", "+00:00")).timestamp()
+                if now - t < 86400:
+                    online += 1
+            except Exception:
+                pass
+    return {"total": total, "repeaters": rep, "chat": chat, "online": online}
 
 
 def _relay_channel_allowed(mc: dict[str, Any], channel: str) -> bool:
@@ -499,6 +532,7 @@ def _relay_send(chan_name: str, sender: str, text: str) -> None:
             r = requests.get(url, params=params, proxies=proxies, timeout=15)
             j = r.json() if r is not None else {}
             if j.get("ok"):
+                _RELAY_COUNT["n"] += 1
                 return
             log.warning("MeshCore→TG relay rejected: %s", j.get("description"))
             return                              # a valid API rejection — don't retry
@@ -592,11 +626,190 @@ def _start_meshcoretel_relay(interval_seconds: int = 15) -> threading.Thread:
     return t
 
 
+def _handle_relay_update(mc: dict[str, Any], msg: dict, state: dict,
+                         token: str, chat_id: str, proxies) -> None:
+    """Handle one incoming relay-group message: `!t` / `/t` sends a test into a
+    MeshCore channel, rate-limited to once per minute."""
+    if str((msg.get("chat") or {}).get("id")) != chat_id:
+        return
+    cmd = (msg.get("text") or "").strip().lower().split("@", 1)[0]
+    if cmd not in ("!t", "!test", "!тест", "/t", "/test"):
+        return
+    thread = msg.get("message_thread_id")
+
+    def reply(txt: str) -> None:
+        p = {"chat_id": chat_id, "text": txt}
+        if thread:
+            p["message_thread_id"] = thread
+        try:
+            requests.get(f"https://api.telegram.org/bot{token}/sendMessage",
+                         params=p, proxies=proxies, timeout=15)
+        except Exception:
+            pass
+
+    test_ch = (mc.get("tg_relay_test_channel") or "").strip()
+    if not test_ch:
+        return                                       # feature off (no test channel)
+    now = time.time()
+    if now - state.get("last_test", 0) < 60:
+        reply("⏳ Тест не чаще раза в минуту")
+        return
+    res = MESHCORE.send_named(test_ch, "🔧 Тест (из Telegram)", wait=True)
+    if res.get("ok"):
+        state["last_test"] = now
+        reply(f"✅ Тест отправлен в {test_ch}")
+    else:
+        reply(f"⚠️ Не удалось: {res.get('error')}")
+
+
+def _start_relay_command_poller() -> threading.Thread:
+    """Long-poll the relay bot for group commands (!t → test into MeshCore).
+    Note: the relay bot needs privacy mode OFF to receive plain `!t` in groups
+    (BotFather → /setprivacy → Disable); `/t` works regardless."""
+    state = {"offset": 0, "last_test": 0.0, "drained": False}
+
+    def loop():
+        time.sleep(25)
+        while True:
+            try:
+                mc = load_config().get("meshcore") or {}
+                token = (mc.get("tg_relay_token") or "").strip()
+                chat_id = str(mc.get("tg_relay_chat_id") or "").strip()
+                on = (mc.get("tg_relay_enabled") and token and chat_id
+                      and (mc.get("tg_relay_test_channel") or "").strip())
+                if not on:
+                    state["drained"] = False
+                    time.sleep(10)
+                    continue
+                proxies = _proxies_dict(_proxy_for(load_config(), "tgstatus"))
+                base = f"https://api.telegram.org/bot{token}/getUpdates"
+                if not state["drained"]:                # skip old backlog on start
+                    r = requests.get(base, params={"timeout": 0, "offset": -1},
+                                     proxies=proxies, timeout=15)
+                    res = (r.json() or {}).get("result") or []
+                    if res:
+                        state["offset"] = res[-1]["update_id"] + 1
+                    state["drained"] = True
+                r = requests.get(base, params={"timeout": 25, "offset": state["offset"],
+                                               "allowed_updates": '["message"]'},
+                                 proxies=proxies, timeout=32)
+                for upd in (r.json() or {}).get("result") or []:
+                    state["offset"] = upd["update_id"] + 1
+                    try:
+                        _handle_relay_update(mc, upd.get("message") or {}, state,
+                                             token, chat_id, proxies)
+                    except Exception:
+                        log.debug("relay command handler failed", exc_info=True)
+            except Exception:
+                log.debug("relay command poll failed", exc_info=True)
+                time.sleep(3)
+
+    t = threading.Thread(target=loop, daemon=True, name="relay-cmd-poller")
+    t.start()
+    return t
+
+
+def _relay_stats_text(mc: dict[str, Any]) -> str:
+    """Build the pinned stats block for the relay topic."""
+    region = (mc.get("tg_relay_region") or "").strip()
+    lines = [f"📊 <b>MeshCore{f' · {region}' if region else ''}</b>"]
+    if region:
+        s = _meshcoretel_region_stats(region)
+        if s.get("total"):
+            lines.append(f"🛰 Узлов в регионе: {s['total']} (📻 {s['repeaters']} · 💬 {s['chat']})")
+            lines.append(f"🟢 Активны за сутки: {s['online']}")
+    st = MESHCORE.status()
+    if st.get("available"):
+        lines.append("📡 Компаньон: " + ("🟢 на связи" if st.get("connected") else "🔴 нет связи"))
+    src = mc.get("tg_relay_source") or "companion"
+    lines.append(f"🔁 Переслано (с рестарта): {_RELAY_COUNT['n']} · источник: {src}")
+    try:
+        w = _tg_status_weather()
+        if w and w.get("temperature_c") is not None:
+            cond = w.get("condition_text") or ""
+            lines.append(f"🌡 {w['temperature_c']:+.0f}°C · {cond}".rstrip(" ·"))
+    except Exception:
+        pass
+    lines.append(f"🕒 Обновлено: {time.strftime('%H:%M')}")
+    return "\n".join(lines)
+
+
+def _save_relay_pin_id(mid) -> None:
+    with _cfg_lock:
+        cfg = load_config()
+        cfg.setdefault("meshcore", {})["tg_relay_pin_msg_id"] = mid
+        save_config(cfg)
+
+
+def _relay_update_pin(mc: dict, text: str, token: str, chat_id: str, proxies) -> None:
+    """Create+pin (once) or edit the relay topic's stats message."""
+    base = f"https://api.telegram.org/bot{token}"
+    mid = mc.get("tg_relay_pin_msg_id")
+    try:
+        if mid:
+            r = requests.get(f"{base}/editMessageText",
+                             params={"chat_id": chat_id, "message_id": mid, "text": text,
+                                     "parse_mode": "HTML", "disable_web_page_preview": True},
+                             proxies=proxies, timeout=15)
+            j = r.json() or {}
+            if j.get("ok"):
+                return
+            desc = (j.get("description") or "").lower()
+            if "not modified" in desc:
+                return                                  # text unchanged — fine
+            if "not found" in desc or "message to edit" in desc or "can't be edited" in desc:
+                mid = None                              # gone → recreate below
+            else:
+                return
+        p = {"chat_id": chat_id, "text": text, "parse_mode": "HTML",
+             "disable_web_page_preview": True}
+        topic = (mc.get("tg_relay_topic_id") or "").strip()
+        if topic:
+            p["message_thread_id"] = topic
+        r = requests.get(f"{base}/sendMessage", params=p, proxies=proxies, timeout=15)
+        new_id = ((r.json() or {}).get("result") or {}).get("message_id")
+        if new_id:
+            _save_relay_pin_id(new_id)
+            try:
+                requests.get(f"{base}/pinChatMessage",
+                             params={"chat_id": chat_id, "message_id": new_id,
+                                     "disable_notification": True},
+                             proxies=proxies, timeout=15)
+            except Exception:
+                pass
+    except Exception:
+        log.debug("relay pin update failed", exc_info=True)
+
+
+def _start_relay_pin_updater(interval_seconds: int = 300) -> threading.Thread:
+    """Maintain a pinned stats message in the relay topic (edited every ~5 min)."""
+    def loop():
+        time.sleep(50)
+        while True:
+            try:
+                mc = load_config().get("meshcore") or {}
+                token = (mc.get("tg_relay_token") or "").strip()
+                chat_id = str(mc.get("tg_relay_chat_id") or "").strip()
+                if (mc.get("tg_relay_enabled") and mc.get("tg_relay_pin_enabled")
+                        and token and chat_id):
+                    proxies = _proxies_dict(_proxy_for(load_config(), "tgstatus"))
+                    _relay_update_pin(mc, _relay_stats_text(mc), token, chat_id, proxies)
+            except Exception:
+                log.debug("relay pin loop error", exc_info=True)
+            time.sleep(interval_seconds)
+
+    t = threading.Thread(target=loop, daemon=True, name="relay-pin")
+    t.start()
+    return t
+
+
 BRIDGE.set_mirror_callback(_mirror_to_meshcore)
 MESHCORE.set_command_handler(_handle_meshcore_command)
 MESHCORE.set_message_callback(_relay_meshcore_to_tg)
 MESHCORE.start()
 _start_meshcoretel_relay()
+_start_relay_command_poller()
+_start_relay_pin_updater()
 
 
 def _start_stats_flusher(interval_seconds: int = 45) -> threading.Thread:
