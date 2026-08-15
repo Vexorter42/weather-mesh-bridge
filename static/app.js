@@ -116,6 +116,7 @@ $$(".tab-btn").forEach(btn => {
       refreshLlmStatus();
       loadMqttConfig();
       refreshMqttStatus();
+    } else if (CURRENT_TAB === "meshcore") {
       loadMeshcoreConfig();
       refreshMeshcoreStatus();
     } else if (CURRENT_TAB === "system") {
@@ -3020,6 +3021,13 @@ function wireMeshcorePanel() {
   $("#mcSave")?.addEventListener("click", async () => { await saveMeshcoreConfig(); toast(t("Сохранено"), "ok"); refreshMeshcoreStatus(); });
   $("#mcRefresh")?.addEventListener("click", refreshMeshcoreChannels);
   $("#mcTest")?.addEventListener("click", testMeshcore);
+  $("#mcRelayAll")?.addEventListener("change", _toggleRelayChannel);
+}
+
+// "All channels" checkbox disables the single-channel picker.
+function _toggleRelayChannel() {
+  const all = $("#mcRelayAll") && $("#mcRelayAll").checked;
+  if ($("#mcRelayChannels")) $("#mcRelayChannels").disabled = !!all;
 }
 
 function _meshcoreFromInputs() {
@@ -3028,16 +3036,24 @@ function _meshcoreFromInputs() {
     port:         $("#mcPort").value.trim() || "auto",
     baud:         Math.max(9600, parseInt($("#mcBaud").value, 10) || 115200),
     channel_name: $("#mcChannelName") ? $("#mcChannelName").value : "",
+    alert_channel_name: $("#mcAlertChannel") ? $("#mcAlertChannel").value : "",
     chunk_delay:  Math.max(0, parseFloat($("#mcChunkDelay").value) || 8),
+    tg_relay_enabled: $("#mcRelayEnabled") ? $("#mcRelayEnabled").checked : false,
+    tg_relay_chat_id: $("#mcRelayChatId") ? $("#mcRelayChatId").value.trim() : "",
+    tg_relay_channels: ($("#mcRelayAll") && $("#mcRelayAll").checked) ? [] : _selectedRelayChannels(),
+    tg_relay_channel_name: "",   // deprecated single-channel field — cleared
+    tg_relay_topic_id: $("#mcRelayTopic") ? $("#mcRelayTopic").value.trim() : "",
+    tg_relay_source: $("#mcRelaySource") ? $("#mcRelaySource").value : "companion",
+    tg_relay_region: $("#mcRelayRegion") ? $("#mcRelayRegion").value.trim() : "",
   };
 }
 
-// Fill the channel <select> from the node's table, preserving the chosen name.
-function _fillMeshcoreChannels(channels, selected) {
-  const sel = $("#mcChannelName");
+// Fill one channel <select> from the node's table, preserving the chosen name.
+function _fillChanSelect(selId, channels, selected, placeholder) {
+  const sel = $(selId);
   if (!sel) return;
   const cur = selected != null ? selected : sel.value;
-  let html = `<option value="">— первый / публичный —</option>`;
+  let html = `<option value="">${placeholder}</option>`;
   let seen = false;
   (channels || []).forEach(c => {
     if (c.name === cur) seen = true;
@@ -3048,16 +3064,43 @@ function _fillMeshcoreChannels(channels, selected) {
   sel.value = cur || "";
 }
 
+// Fill the main-channel, alert-channel and relay-source selects.
+function _fillMeshcoreChannels(channels, mainSel, alertSel, relayList) {
+  _fillChanSelect("#mcChannelName", channels, mainSel, "— первый / публичный —");
+  _fillChanSelect("#mcAlertChannel", channels, alertSel, "— не пересылать —");
+  _fillRelayMulti(channels, relayList);
+}
+
+function _selectedRelayChannels() {
+  const sel = $("#mcRelayChannels");
+  return sel ? Array.from(sel.selectedOptions).map(o => o.value) : [];
+}
+
+// Multi-select of channels to relay; preserves any saved channel not (yet) in the node list.
+function _fillRelayMulti(channels, selected) {
+  const sel = $("#mcRelayChannels");
+  if (!sel) return;
+  const cur = Array.isArray(selected) ? selected : _selectedRelayChannels();
+  const curLc = cur.map(x => (x || "").toLowerCase());
+  const names = (channels || []).map(c => c.name);
+  cur.forEach(n => { if (!names.some(x => (x || "").toLowerCase() === (n || "").toLowerCase())) names.push(n); });
+  sel.innerHTML = names.map(n =>
+    `<option value="${escapeHtml(n)}"${curLc.includes((n || "").toLowerCase()) ? " selected" : ""}>${escapeHtml(n)}</option>`
+  ).join("");
+}
+
 async function refreshMeshcoreChannels() {
   try {
     const r = await api("/api/meshcore/channels?refresh=1");
-    _fillMeshcoreChannels(r.channels, null);
+    _fillMeshcoreChannels(r.channels, null, null, null);
     toast(tf("Каналов найдено: {0}", (r.channels || []).length), "ok");
   } catch (e) { toast(e.message, "err"); }
 }
 
 async function saveMeshcoreConfig() {
   const meshcore = _meshcoreFromInputs();
+  const tok = $("#mcRelayToken") ? $("#mcRelayToken").value.trim() : "";
+  if (tok) meshcore.tg_relay_token = tok;   // only send if typed (don't wipe saved)
   try { await api("/api/config", { method: "POST", body: { meshcore } }); }
   catch (e) { toast(e.message, "err"); }
 }
@@ -3069,8 +3112,16 @@ async function refreshMeshcoreStatus() {
   // Fill the detected-ports datalist for the picker.
   const dl = $("#mcPortList");
   if (dl) dl.innerHTML = (s.detected_ports || []).map(p => `<option value="${escapeHtml(p)}">`).join("");
-  // Populate the channel dropdown from the node table.
-  if (s.channels && s.channels.length) _fillMeshcoreChannels(s.channels, s.channel_name);
+  // Populate the channel dropdowns from the node table.
+  if (s.channels && s.channels.length) _fillMeshcoreChannels(s.channels, s.channel_name, s.alert_channel_name, s.tg_relay_channels);
+  // Reflect the Telegram-relay state.
+  if ($("#mcRelayEnabled")) $("#mcRelayEnabled").checked = !!s.tg_relay_enabled;
+  if ($("#mcRelayChatId") && !$("#mcRelayChatId").value && s.tg_relay_chat_id) $("#mcRelayChatId").value = s.tg_relay_chat_id;
+  if ($("#mcRelayTopic") && !$("#mcRelayTopic").value && s.tg_relay_topic_id) $("#mcRelayTopic").value = s.tg_relay_topic_id;
+  if ($("#mcRelayToken") && !$("#mcRelayToken").value && s.tg_relay_token_set) $("#mcRelayToken").placeholder = "(сохранён)";
+  if ($("#mcRelayAll")) { $("#mcRelayAll").checked = !(s.tg_relay_channels && s.tg_relay_channels.length); _toggleRelayChannel(); }
+  if ($("#mcRelaySource") && s.tg_relay_source) $("#mcRelaySource").value = s.tg_relay_source;
+  if ($("#mcRelayRegion") && !$("#mcRelayRegion").value && s.tg_relay_region) $("#mcRelayRegion").value = s.tg_relay_region;
   const chLabel = s.channel_name || `#${s.channel_index}`;
   if (!s.available) {
     setMeshcoreStatus("err", "библиотека meshcore не установлена на сервере");
@@ -3115,8 +3166,16 @@ async function loadMeshcoreConfig() {
   if ($("#mcPort") && !$("#mcPort").value) $("#mcPort").value = m.port || "auto";
   if ($("#mcBaud")) $("#mcBaud").value = m.baud || 115200;
   if ($("#mcChunkDelay") && m.chunk_delay != null) $("#mcChunkDelay").value = m.chunk_delay;
-  if ($("#mcChannelName") && m.channel_name) _fillMeshcoreChannels([], m.channel_name);
+  if (m.channel_name || m.alert_channel_name || (m.tg_relay_channels && m.tg_relay_channels.length))
+    _fillMeshcoreChannels([], m.channel_name, m.alert_channel_name, m.tg_relay_channels);
   if (typeof m.enabled === "boolean") $("#mcEnabled").checked = m.enabled;
+  if (typeof m.tg_relay_enabled === "boolean") $("#mcRelayEnabled").checked = m.tg_relay_enabled;
+  if ($("#mcRelayChatId") && !$("#mcRelayChatId").value && m.tg_relay_chat_id) $("#mcRelayChatId").value = m.tg_relay_chat_id;
+  if ($("#mcRelayTopic") && !$("#mcRelayTopic").value && m.tg_relay_topic_id) $("#mcRelayTopic").value = m.tg_relay_topic_id;
+  if ($("#mcRelayToken") && m.tg_relay_token) $("#mcRelayToken").placeholder = "(сохранён)";
+  if ($("#mcRelayAll") && typeof m.tg_relay_enabled === "boolean") { $("#mcRelayAll").checked = !(m.tg_relay_channels && m.tg_relay_channels.length); _toggleRelayChannel(); }
+  if ($("#mcRelaySource") && m.tg_relay_source) $("#mcRelaySource").value = m.tg_relay_source;
+  if ($("#mcRelayRegion") && !$("#mcRelayRegion").value && m.tg_relay_region) $("#mcRelayRegion").value = m.tg_relay_region;
 }
 
 function setMeshcoreStatus(kind, text) {

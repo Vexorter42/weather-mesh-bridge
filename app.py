@@ -6,6 +6,8 @@ Then open http://<raspberry-ip>:5000 from any device on the LAN.
 """
 from __future__ import annotations
 
+import collections
+import html
 import io
 import json
 import logging
@@ -14,6 +16,7 @@ import shutil
 import subprocess
 import threading
 import time
+import urllib.parse
 import uuid
 import zipfile
 from datetime import datetime, timedelta
@@ -49,7 +52,7 @@ logging.basicConfig(
 )
 log = logging.getLogger("weather-mesh-bridge")
 
-VERSION = "2.14.2"
+VERSION = "2.15.0"
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "config.json"
@@ -393,9 +396,207 @@ def _handle_meshcore_command(text: str, channel_index: int,
     return commands.handle(msg, bridge=BRIDGE, cfg=cfg)
 
 
+_ADVERTS_CACHE: dict[str, Any] = {"ts": 0.0, "region": "", "map": {}}
+
+
+def _meshcoretel_pubkey(name: str, region: str) -> Optional[str]:
+    """Resolve a MeshCore node name → its public key via meshcoretel's adverts
+    API (cached ~10 min), for building a node-page link. None if unknown."""
+    name = (name or "").strip()
+    region = (region or "").strip()
+    if not name or not region:
+        return None
+    now = time.time()
+    if now - _ADVERTS_CACHE["ts"] > 600 or _ADVERTS_CACHE["region"] != region:
+        try:
+            r = requests.get(
+                "https://meshcoretel.ru/api/adverts",
+                params={"region_code": region, "limit": 2000},
+                headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"},
+                timeout=15,
+            )
+            items = r.json() if r is not None else []
+            m: dict[str, str] = {}
+            for it in items:
+                nm = (it.get("name") or "").strip().lower()
+                pk = it.get("public_key_hex")
+                if nm and pk:
+                    m.setdefault(nm, pk)
+            _ADVERTS_CACHE.update(ts=now, region=region, map=m)
+        except Exception:
+            log.debug("meshcoretel adverts fetch failed", exc_info=True)
+    return _ADVERTS_CACHE["map"].get(name.lower())
+
+
+def _relay_channel_allowed(mc: dict[str, Any], channel: str) -> bool:
+    """Relay filter: an empty channel list means all channels; otherwise only
+    the listed ones (case-insensitive)."""
+    chans = mc.get("tg_relay_channels") or []
+    if not isinstance(chans, list) or not chans:
+        return True
+    ch = (channel or "").strip().lower()
+    return ch in [str(c).strip().lower() for c in chans]
+
+
+_RELAY_SEEN: "collections.OrderedDict[str, float]" = collections.OrderedDict()
+
+
+def _relay_is_new(channel: str, sender: str, text: str,
+                  ttl: int = 600, cap: int = 5000) -> bool:
+    """Cross-source dedup for the relay: True the first time a (channel, sender,
+    text) message is seen within `ttl` seconds — so the same message coming from
+    both the companion and meshcoretel is forwarded only once."""
+    key = (f"{(channel or '').strip().lower()}|{(sender or '').strip().lower()}|"
+           f"{' '.join((text or '').split())}")
+    now = time.time()
+    while _RELAY_SEEN:                                 # prune oldest (front)
+        k0 = next(iter(_RELAY_SEEN))
+        if now - _RELAY_SEEN[k0] > ttl or len(_RELAY_SEEN) > cap:
+            _RELAY_SEEN.pop(k0, None)
+        else:
+            break
+    if key in _RELAY_SEEN:
+        return False
+    _RELAY_SEEN[key] = now
+    return True
+
+
+def _relay_send(chan_name: str, sender: str, text: str) -> None:
+    """Post one message to the relay Telegram group (separate bot, retries, topic
+    support). Never logs the exception object — it holds the URL with the token."""
+    mc = (load_config().get("meshcore") or {})
+    token = (mc.get("tg_relay_token") or "").strip()
+    chat_id = (mc.get("tg_relay_chat_id") or "").strip()
+    if not token or not chat_id:
+        return
+    # Format (HTML): node name (bold, linked to its meshcoretel page) · channel,
+    # then the message text below.
+    esc_text = html.escape(text or "")
+    if sender:
+        name = html.escape(sender)
+        tpl = (mc.get("tg_relay_node_url") or "").strip()
+        region = (mc.get("tg_relay_region") or "").strip()
+        if tpl:
+            pk = _meshcoretel_pubkey(sender, region)
+            if pk:
+                url = tpl.replace("{pubkey}", pk).replace("{region}", region)
+                name = f'<a href="{html.escape(url)}">{name}</a>'
+        head = f"<b>{name}</b>"
+        if chan_name:
+            head += f" · {html.escape(chan_name)}"
+        body = f"{head}\n{esc_text}"
+    else:
+        body = esc_text
+    params = {"chat_id": chat_id, "text": body[:4000], "disable_web_page_preview": True,
+              "parse_mode": "HTML"}
+    topic = (mc.get("tg_relay_topic_id") or "").strip()
+    if topic:
+        params["message_thread_id"] = topic     # forum-topic groups
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    proxies = _proxies_dict(_proxy_for(load_config(), "tgstatus"))
+    for attempt in range(3):                     # managed proxy is flaky → retry
+        try:
+            r = requests.get(url, params=params, proxies=proxies, timeout=15)
+            j = r.json() if r is not None else {}
+            if j.get("ok"):
+                return
+            log.warning("MeshCore→TG relay rejected: %s", j.get("description"))
+            return                              # a valid API rejection — don't retry
+        except Exception:
+            if attempt < 2:
+                time.sleep(2)
+    log.warning("MeshCore→TG relay: send failed (network/proxy) after retries")
+
+
+def _relay_meshcore_to_tg(chan_name: str, sender: str, text: str) -> None:
+    """Companion-sourced relay callback: post a locally-received channel message.
+    Skipped when the source is meshcoretel (the poller handles it there)."""
+    mc = (load_config().get("meshcore") or {})
+    if not mc.get("tg_relay_enabled"):
+        return
+    if (mc.get("tg_relay_source") or "companion") not in ("companion", "both"):
+        return                                  # meshcoretel-only → poller relays
+    if not _relay_channel_allowed(mc, chan_name):
+        return                              # channel not in the relay list
+    if not _relay_is_new(chan_name, sender, text):
+        return                              # already forwarded (e.g. via meshcoretel)
+    _relay_send(chan_name, sender, text)
+
+
+def _start_meshcoretel_relay(interval_seconds: int = 15) -> threading.Thread:
+    """When the relay source is 'meshcoretel', poll the regional packet API for
+    group-text messages (full multi-observer coverage), dedup by packet hash, and
+    forward new ones to the Telegram group. The first poll only seeds the seen-set
+    so old history isn't back-filled."""
+    seen: "collections.deque" = collections.deque(maxlen=4000)
+    seen_set: set = set()
+
+    def mark(h):
+        if len(seen) == seen.maxlen:
+            seen_set.discard(seen.popleft())
+        seen.append(h)
+        seen_set.add(h)
+
+    def loop():
+        time.sleep(60)
+        first = True
+        while True:
+            try:
+                mc = load_config().get("meshcore") or {}
+                active = (mc.get("tg_relay_enabled")
+                          and (mc.get("tg_relay_source") or "companion") in ("meshcoretel", "both")
+                          and mc.get("tg_relay_token") and mc.get("tg_relay_chat_id"))
+                if active:
+                    region = (mc.get("tg_relay_region") or "").strip()
+                    if region:
+                        r = requests.get(
+                            "https://meshcoretel.ru/api/packets",
+                            params={"region_code": region, "limit": 100},
+                            headers={                       # API 403s non-browser UAs
+                                "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) "
+                                              "AppleWebKit/537.36 (KHTML, like Gecko) "
+                                              "Chrome/124 Safari/537.36",
+                                "Accept": "application/json",
+                            },
+                            timeout=15,          # direct — meshcoretel isn't ISP-blocked
+                        )
+                        items = r.json() if r is not None else []
+                        relayed = 0
+                        for it in reversed(items):          # oldest first
+                            h = it.get("hash")
+                            txt = it.get("group_message_text")
+                            if not h or not txt or h in seen_set:
+                                continue
+                            mark(h)
+                            if first:
+                                continue                    # don't back-fill history
+                            ch = it.get("group_channel_name") or ""
+                            if not _relay_channel_allowed(mc, ch):
+                                continue
+                            snd = it.get("sender_name") or ""
+                            if not _relay_is_new(ch, snd, txt):
+                                continue                    # already sent by the companion
+                            _relay_send(ch, snd, txt)
+                            relayed += 1
+                        if first:
+                            log.info("meshcoretel relay: seeded %d msgs (region %s)", len(seen), region)
+                        elif relayed:
+                            log.info("meshcoretel relay: %d new msg(s) forwarded", relayed)
+                        first = False
+            except Exception as exc:
+                log.warning("meshcoretel relay poll failed: %s", repr(exc)[:200])
+            time.sleep(interval_seconds)
+
+    t = threading.Thread(target=loop, daemon=True, name="meshcoretel-relay")
+    t.start()
+    return t
+
+
 BRIDGE.set_mirror_callback(_mirror_to_meshcore)
 MESHCORE.set_command_handler(_handle_meshcore_command)
+MESHCORE.set_message_callback(_relay_meshcore_to_tg)
 MESHCORE.start()
+_start_meshcoretel_relay()
 
 
 def _start_stats_flusher(interval_seconds: int = 45) -> threading.Thread:
@@ -432,8 +633,14 @@ def _telegram_forward(text: str, channel_index: int, destination: str) -> None:
         channel_index=int(channel_index if channel_index is not None else mesh_cfg.get("channel_index", 0)),
         destination=destination or mesh_cfg.get("destination") or "broadcast",
         chunk_delay=_chunk_delay(mesh_cfg),
-        mirror=False,   # Telegram-forwarded alerts are not mirrored into MeshCore
+        mirror=False,   # kept off the main MeshCore channel; routed separately below
     )
+    # Telegram-forwarded alerts go to their own MeshCore channel (if configured),
+    # instead of the main mirror channel. No-op when no alert channel is set.
+    try:
+        MESHCORE.send_alert(text)
+    except Exception:
+        log.exception("MeshCore alert mirror failed")
 
 
 def _telegram_summarize(text: str) -> Optional[str]:

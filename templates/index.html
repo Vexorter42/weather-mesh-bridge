@@ -61,6 +61,7 @@
     <button class="tab-btn" data-tab="weather"><span class="nav-icon" aria-hidden="true">🌦</span><span class="nav-label">Погода</span></button>
     <button class="tab-btn" data-tab="chat"><span class="nav-icon" aria-hidden="true">💬</span><span class="nav-label">Чат</span><span class="badge" id="chatBadge" hidden>0</span></button>
     <button class="tab-btn" data-tab="integr"><span class="nav-icon" aria-hidden="true">🔌</span><span class="nav-label">Интеграции</span></button>
+    <button class="tab-btn" data-tab="meshcore"><span class="nav-icon" aria-hidden="true">📡</span><span class="nav-label">MeshCore</span></button>
     <button class="tab-btn" data-tab="system"><span class="nav-icon" aria-hidden="true">⚙️</span><span class="nav-label">Система</span></button>
   </nav>
 
@@ -894,7 +895,11 @@
           </div>
         </details>
 
-        <details class="experiment" id="experimentMeshcore">
+    </div>
+
+    <!-- =================== MESHCORE =================== -->
+    <div class="tab-panel" data-tab="meshcore">
+        <details class="experiment" id="experimentMeshcore" open>
           <summary>
             <label class="toggle-row" onclick="event.stopPropagation();">
               <input type="checkbox" id="mcEnabled">
@@ -925,8 +930,45 @@
               <label>Канал <small>(названия подтягиваются с ноды)</small>
                 <select id="mcChannelName"><option value="">— первый / публичный —</option></select>
               </label>
+              <label>Канал для форвардов из Telegram <small>(алерты — в отдельный канал; пусто — не пересылать)</small>
+                <select id="mcAlertChannel"><option value="">— не пересылать —</option></select>
+              </label>
               <label>Пауза между частями, сек <small>(длинные сообщения бьются на части)</small>
                 <input type="number" id="mcChunkDelay" min="0" max="30" step="0.5" value="8">
+              </label>
+            </div>
+
+            <div class="profile-section">Ретрансляция в Telegram-группу (в одну сторону)</div>
+            <label class="toggle-row">
+              <input type="checkbox" id="mcRelayEnabled">
+              <span>Слать сообщения каналов MeshCore в Telegram-группу через <strong>отдельный бот</strong> (не тот, что в статусе)</span>
+            </label>
+            <label class="toggle-row">
+              <input type="checkbox" id="mcRelayAll">
+              <span><strong>Все каналы</strong> — ретранслировать любой канал; сними галочку, чтобы выбрать один</span>
+            </label>
+            <div class="grid2">
+              <label>Источник сообщений <small>(компаньон слышит не всё; meshcoretel — со всех приёмников региона)</small>
+                <select id="mcRelaySource">
+                  <option value="both">Оба — нода + meshcoretel (дедуп, ничего не теряется)</option>
+                  <option value="companion">Только компаньон (локально)</option>
+                  <option value="meshcoretel">Только meshcoretel (полное покрытие)</option>
+                </select>
+              </label>
+              <label>Регион meshcoretel <small>(код региона, напр. CSY — только для meshcoretel)</small>
+                <input type="text" id="mcRelayRegion" placeholder="CSY">
+              </label>
+              <label>Токен бота <small>(отдельный, от @BotFather; хранится в config.json)</small>
+                <input type="password" id="mcRelayToken" placeholder="123456:ABC…" autocomplete="off">
+              </label>
+              <label>Chat ID группы <small>(добавь бота в группу; id — через @getmyid_bot)</small>
+                <input type="text" id="mcRelayChatId" placeholder="-100…">
+              </label>
+              <label>Каналы для пересылки <small>(если не «все» — выбери один или несколько, Ctrl/⌘)</small>
+                <select id="mcRelayChannels" multiple size="4"></select>
+              </label>
+              <label>ID темы <small>(только для групп с темами/форумом; пусто — General)</small>
+                <input type="text" id="mcRelayTopic" placeholder="напр. 2">
               </label>
             </div>
 

@@ -56,7 +56,21 @@ DEFAULTS = {
     "baud": 115200,
     "channel_name": "",     # channel to send to, by name (pulled from the node); "" = first
     "channel_index": 0,     # numeric fallback when the name can't be resolved
+    "alert_channel_name": "",  # separate channel for Telegram-forwarded alerts ("" = don't mirror them)
     "chunk_delay": 8.0,     # seconds between multi-part message chunks (LoRa airtime)
+    # One-way MeshCore→Telegram relay: post every channel message to a TG group
+    # via a SEPARATE bot (its own token, so it never clashes with the status bot).
+    "tg_relay_enabled": False,
+    "tg_relay_token": "",
+    "tg_relay_chat_id": "",
+    "tg_relay_channel_name": "",  # deprecated (kept for migration); use tg_relay_channels
+    "tg_relay_channels": [],      # channels to relay ([] = all; else only these names)
+    "tg_relay_topic_id": "",      # forum topic (message_thread_id); "" = General/no topic
+    "tg_relay_source": "companion",  # "companion" (local RX) or "meshcoretel" (regional API, full coverage)
+    "tg_relay_region": "",        # meshcoretel region_code (e.g. CSY) when source=meshcoretel
+    # Link template for the node name; {pubkey}/{region} filled in (name→pubkey
+    # resolved via meshcoretel adverts). "" = no link.
+    "tg_relay_node_url": "https://meshcoretel.ru/ru/{region}/adverts?pubkey={pubkey}",
 }
 
 MAX_CHANNELS = 16           # how many channel slots to probe on the Companion
@@ -83,6 +97,9 @@ class MeshCoreBridge:
         self._resolved_port = ""
         self._channels: list[dict] = []       # [{index, name}] read from the Companion
         self._command_handler: Optional[Callable[..., Optional[str]]] = None
+        # Called for every incoming channel message (channel_name, sender, text)
+        # — app.py uses it to relay the MeshCore chat one-way into a Telegram group.
+        self._message_callback: Optional[Callable[[str, str, str], None]] = None
         self._rx_count = 0
         # Recent RF-log paths (recv_ts, hops[]) for text packets — used to show
         # the real route of an incoming command. Populated only when the
@@ -112,6 +129,11 @@ class MeshCoreBridge:
         incoming MeshCore channel messages that look like commands (start with
         ! or /). `meta` = {hops_taken, from_id}."""
         self._command_handler = fn
+
+    def set_message_callback(self, fn: Callable[[str, str, str], None]) -> None:
+        """fn(channel_name, sender, text) — called for EVERY incoming channel
+        message (for the one-way MeshCore→Telegram relay)."""
+        self._message_callback = fn
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -288,6 +310,15 @@ class MeshCoreBridge:
             sender, body = sender.strip(), body.strip()
         else:
             sender, body = "", raw
+        # Relay every channel message to a Telegram group (one-way), if wired.
+        # Fire-and-forget so the Telegram HTTP call never blocks the reader.
+        if self._message_callback and body:
+            chan_name = next((c["name"] for c in self._channels if c["index"] == chan), str(chan))
+            try:
+                asyncio.get_running_loop().run_in_executor(
+                    None, self._message_callback, chan_name, sender, body)
+            except Exception:
+                log.debug("MeshCore relay dispatch failed", exc_info=True)
         if not body or not (body.startswith("!") or body.startswith("/")):
             return
         # MeshCore-specific: !trace <node> actively discovers the route (path
@@ -454,13 +485,20 @@ class MeshCoreBridge:
         to a numeric name, then channel_index, then 0."""
         c = self._mc_cfg()
         name = (c.get("channel_name") or "").strip()
-        if name:
-            for ch in self._channels:
-                if ch["name"].lower() == name.lower():
-                    return ch["index"]
-            if name.isdigit():
-                return int(name)
+        idx = self._chan_index_by_name(name)
+        if idx is not None:
+            return idx
         return int(c.get("channel_index") or 0)
+
+    def _chan_index_by_name(self, name: str) -> Optional[int]:
+        """Channel name → index from the Companion table (numeric name allowed)."""
+        name = (name or "").strip()
+        if not name:
+            return None
+        for ch in self._channels:
+            if ch["name"].lower() == name.lower():
+                return ch["index"]
+        return int(name) if name.isdigit() else None
 
     async def _teardown(self) -> None:
         if self._mc is not None:
@@ -539,6 +577,17 @@ class MeshCoreBridge:
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
 
+    def send_alert(self, text: str) -> dict:
+        """Mirror a Telegram-forwarded alert into the separate alert channel.
+        No-op (returns quietly) if no alert channel is configured."""
+        name = (self._mc_cfg().get("alert_channel_name") or "").strip()
+        if not name:
+            return {"ok": False, "error": "no alert channel"}
+        idx = self._chan_index_by_name(name)
+        if idx is None:
+            return {"ok": False, "error": f"канал «{name}» не найден"}
+        return self.send_channel(text, channel_index=idx)
+
     def channels(self, refresh: bool = False) -> list[dict]:
         """Cached channel table [{index, name}]. refresh=True re-reads the node."""
         if refresh and self._loop and self._connected:
@@ -560,6 +609,15 @@ class MeshCoreBridge:
             "baud": int(c.get("baud") or 115200),
             "channel_name": c.get("channel_name") or "",
             "channel_index": self._resolve_chan(),
+            "alert_channel_name": c.get("alert_channel_name") or "",
+            "tg_relay_enabled": bool(c.get("tg_relay_enabled")),
+            "tg_relay_token_set": bool(c.get("tg_relay_token")),
+            "tg_relay_chat_id": c.get("tg_relay_chat_id") or "",
+            "tg_relay_channel_name": c.get("tg_relay_channel_name") or "",
+            "tg_relay_channels": c.get("tg_relay_channels") or [],
+            "tg_relay_topic_id": c.get("tg_relay_topic_id") or "",
+            "tg_relay_source": c.get("tg_relay_source") or "companion",
+            "tg_relay_region": c.get("tg_relay_region") or "",
             "channels": list(self._channels),
             "detected_ports": self.list_ports(),
             "sent_count": self._sent_count,

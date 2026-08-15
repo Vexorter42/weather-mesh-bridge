@@ -370,6 +370,45 @@ def _ai_remember(node_id: Optional[str], role: str, content: str) -> None:
         del lst[: len(lst) - keep]
 
 
+_SIT_DOW = ["понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье"]
+
+
+def _situation_context(cfg, bridge) -> str:
+    """Compact snapshot of the real 'now' — date/time, weather, mesh state — so
+    /ai answers about the current situation instead of stale training memory."""
+    parts: list[str] = []
+    loc = cfg.get("location") or {}
+    city = (loc.get("name") or "").strip()
+    now = datetime.now()
+    line = f"Дата и время: {now.strftime('%d.%m.%Y %H:%M')} ({_SIT_DOW[now.weekday()]})"
+    if city:
+        line += f", {city}"
+    parts.append(line + ".")
+    # Current weather — cached in weather.py, so usually instant; best-effort.
+    try:
+        if loc.get("latitude") is not None:
+            data = weather.fetch_weather(loc["latitude"], loc["longitude"],
+                                         loc.get("timezone") or "auto")
+            w = weather.format_message(
+                data, fields=["temp", "feels", "humidity", "wind", "precipitation", "forecast"],
+                location_name=city, include_header=False, use_emojis=False)
+            w = " ".join((w or "").split())
+            if w:
+                parts.append("Погода сейчас: " + w)
+    except Exception:
+        log.debug("/ai situation: weather fetch failed", exc_info=True)
+    # Mesh state — cheap, from the bridge.
+    try:
+        st = bridge.status() if bridge else {}
+        online = st.get("nodes_online_2h")
+        if online is not None:
+            parts.append(f"Mesh-сеть: онлайн {online} узлов (за 2ч), "
+                         f"шлюз {'на связи' if st.get('connected') else 'офлайн'}.")
+    except Exception:
+        pass
+    return "\n".join(parts)
+
+
 @command(
     "ai", "ии", "gpt", "спроси", "ask",
     help_text="/ai <вопрос> — спросить ИИ (ответ кратко, в эфир)",
@@ -385,8 +424,16 @@ def cmd_ai(args, msg, bridge, cfg):
     node_id = msg.get("from_id")
     use_ctx = bool((cfg.get("llm") or {}).get("context_memory", True))
     history = _ai_history(node_id) if use_ctx else None
+    # Ground the answer in the real current situation (time/weather/mesh) instead
+    # of the model's frozen training memory.
+    base = (cfg.get("llm") or {}).get("system_prompt") or llm.DEFAULTS["system_prompt"]
+    sit = _situation_context(cfg, bridge)
+    sys_prompt = base
+    if sit:
+        sys_prompt += ("\n\nАктуальные данные на сейчас (опирайся на них и не выдумывай; "
+                       "если вопрос не про них — отвечай как обычно):\n" + sit)
     try:
-        answer = llm.ask(question, cfg, history=history)
+        answer = llm.ask(question, cfg, system_override=sys_prompt, history=history)
     except Exception as exc:
         log.warning("/ai failed: %s", exc)
         return f"ИИ недоступен: {exc}"
