@@ -52,7 +52,7 @@ logging.basicConfig(
 )
 log = logging.getLogger("weather-mesh-bridge")
 
-VERSION = "2.15.1"
+VERSION = "2.15.2"
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "config.json"
@@ -2148,6 +2148,7 @@ def api_chat_send():
             channel_index=channel_index,
             destination=destination,
             chunk_delay=_chunk_delay(mesh_cfg),
+            mirror=False,   # manual web-chat / ether sends stay on Meshtastic only
         )
     except Exception as exc:
         return jsonify({"error": str(exc)}), 500
