@@ -12,6 +12,13 @@ PySocks>=1.7.1
 # MQTT publishing to Home Assistant (weather + mesh telemetry + alerts).
 paho-mqtt>=1.6.1
 
+# Keyless DuckDuckGo backend for the /ai web-search tool (web_search.py). Only
+# needed when web_search.enabled=true with provider=duckduckgo; the searxng and
+# tavily providers use plain requests and need nothing extra.
+ddgs>=6.0
+
+
+
 # MeshCore mirror — mirror broadcasts into a MeshCore network via a Companion
 # node (USB serial / BLE / TCP). Only needed if you enable the MeshCore card.
 meshcore>=2.3.0

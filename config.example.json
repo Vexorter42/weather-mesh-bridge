@@ -41,5 +41,15 @@
     "temperature": 0.6,
     "proxy": "",
     "max_reply_chars": 600
+  },
+  "web_search": {
+    "enabled": false,
+    "provider": "duckduckgo",
+    "max_results": 5,
+    "timeout_seconds": 12,
+    "region": "ru-ru",
+    "proxy": "",
+    "searxng_url": "",
+    "tavily_api_key": ""
   }
 }

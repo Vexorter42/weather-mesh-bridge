@@ -433,7 +433,8 @@ def cmd_ai(args, msg, bridge, cfg):
         sys_prompt += ("\n\nАктуальные данные на сейчас (опирайся на них и не выдумывай; "
                        "если вопрос не про них — отвечай как обычно):\n" + sit)
     try:
-        answer = llm.ask(question, cfg, system_override=sys_prompt, history=history)
+        answer = llm.ask(question, cfg, system_override=sys_prompt,
+                         history=history, allow_web=True)
     except Exception as exc:
         log.warning("/ai failed: %s", exc)
         return f"ИИ недоступен: {exc}"

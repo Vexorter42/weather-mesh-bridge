@@ -22,12 +22,44 @@ Config lives in config.json under "llm" (the api_key stays out of git):
 """
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any, Optional
 
 import requests
 
 log = logging.getLogger(__name__)
+
+# Web-search tool exposed to the model when the caller passes allow_web=True and
+# web_search is enabled in config. The model decides whether to call it.
+MAX_TOOL_ITERS = 2
+WEB_SEARCH_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "web_search",
+        "description": (
+            "Поиск в интернете для свежей или фактической информации: новости, "
+            "события, курсы/цены, факты после обучения модели. Возвращает "
+            "заголовки, сниппеты и ссылки."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Поисковый запрос на языке вопроса",
+                },
+            },
+            "required": ["query"],
+        },
+    },
+}
+_WEB_HINT = (
+    "\n\nУ тебя есть инструмент web_search. Если для точного ответа нужны свежие "
+    "данные из интернета (новости, события, цены, факты после обучения) — вызови "
+    "его с коротким точным запросом и опирайся на результаты, не выдумывай. "
+    "Финальный ответ всё равно держи коротким."
+)
 
 DEFAULTS = {
     "enabled": False,
@@ -96,16 +128,20 @@ def _model_candidates(c: dict[str, Any]) -> list[str]:
     return out
 
 
-def _complete(c: dict[str, Any], model: str, messages: list[dict[str, str]]) -> str:
-    """One chat-completion call against `model`. Raises RuntimeError on failure."""
+def _post_chat(c: dict[str, Any], model: str, messages: list[dict[str, Any]],
+               tools: Optional[list] = None) -> dict[str, Any]:
+    """One chat-completion call against `model`; returns the raw assistant
+    `message` (which may carry `tool_calls`). Raises RuntimeError on failure."""
     url = f"{(c.get('base_url') or '').rstrip('/')}/chat/completions"
-    payload = {
+    payload: dict[str, Any] = {
         "model": model,
         "messages": messages,
         "max_tokens": int(c.get("max_tokens") or 200),
         "temperature": float(c.get("temperature") or 0.6),
         "stream": False,
     }
+    if tools:
+        payload["tools"] = tools
     headers = {
         "Authorization": f"Bearer {c['api_key']}",
         "Content-Type": "application/json",
@@ -132,33 +168,97 @@ def _complete(c: dict[str, Any], model: str, messages: list[dict[str, str]]) -> 
 
     try:
         data = r.json()
-        message = data["choices"][0]["message"]
-        text = message.get("content")
+        return data["choices"][0]["message"]
     except Exception as exc:
         raise RuntimeError(f"LLM: не смог разобрать ответ: {exc}") from exc
 
-    text = (text or "").strip()
-    if not text:
-        # Reasoning/"thinking" models (e.g. kimi-k2.6) can burn the whole token
-        # budget on internal reasoning and return empty content.
-        if message.get("reasoning") or message.get("reasoning_content"):
-            raise RuntimeError(
-                "Модель потратила лимит на «размышления» и не выдала ответ. "
-                "Подними max_tokens (≥1500) или выбери модель без reasoning."
-            )
-        raise RuntimeError("LLM вернул пустой ответ")
 
+def _cap(c: dict[str, Any], text: str) -> str:
     cap = int(c.get("max_reply_chars") or 600)
     if len(text) > cap:
         text = text[:cap - 1].rstrip() + "…"
     return text
 
 
+def _message_text(c: dict[str, Any], message: dict[str, Any]) -> str:
+    """Extract non-empty capped text from an assistant message, else raise."""
+    text = (message.get("content") or "").strip()
+    if not text:
+        # Reasoning/"thinking" models can burn the whole token budget on internal
+        # reasoning and return empty content.
+        if message.get("reasoning") or message.get("reasoning_content"):
+            raise RuntimeError(
+                "Модель потратила лимит на «размышления» и не выдала ответ. "
+                "Подними max_tokens (≥1500) или выбери модель без reasoning."
+            )
+        raise RuntimeError("LLM вернул пустой ответ")
+    return _cap(c, text)
+
+
+def _complete(c: dict[str, Any], model: str, messages: list[dict[str, Any]]) -> str:
+    """One plain chat-completion returning the answer text (no tools)."""
+    return _message_text(c, _post_chat(c, model, messages))
+
+
+def _parse_tool_args(raw: Any) -> dict[str, Any]:
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str):
+        try:
+            return json.loads(raw)
+        except Exception:
+            return {}
+    return {}
+
+
+def _run_tool_loop(c: dict[str, Any], model: str,
+                   messages: list[dict[str, Any]], cfg: dict[str, Any]) -> str:
+    """Chat loop with the web_search tool: model may search up to MAX_TOOL_ITERS
+    times; the last round is forced tool-free to produce a final answer."""
+    import web_search
+
+    msgs: list[dict[str, Any]] = list(messages)
+    for step in range(MAX_TOOL_ITERS + 1):
+        tools = [WEB_SEARCH_TOOL] if step < MAX_TOOL_ITERS else None
+        message = _post_chat(c, model, msgs, tools=tools)
+        tool_calls = message.get("tool_calls") or []
+        if not tool_calls:
+            return _message_text(c, message)
+        for i, tc in enumerate(tool_calls):
+            tc.setdefault("id", f"call_{step}_{i}")
+            tc.setdefault("type", "function")
+        msgs.append({"role": "assistant",
+                     "content": message.get("content") or "",
+                     "tool_calls": tool_calls})
+        for tc in tool_calls:
+            fn = tc.get("function") or {}
+            name = fn.get("name")
+            if name == "web_search":
+                query = (_parse_tool_args(fn.get("arguments")).get("query") or "").strip()
+                try:
+                    results = web_search.search(query, cfg)
+                    content = web_search.format_results(results)
+                    log.info("/ai web_search «%s» → %d результатов", query, len(results))
+                except Exception as exc:
+                    content = f"Ошибка поиска: {exc}"
+                    log.warning("/ai web_search «%s» failed: %s", query, exc)
+            else:
+                content = f"Неизвестный инструмент: {name}"
+            msgs.append({"role": "tool", "tool_call_id": tc.get("id"),
+                         "content": content})
+    # Tool budget exhausted without a plain answer — one final tool-free call.
+    return _complete(c, model, msgs)
+
+
 def ask(question: str, cfg: dict[str, Any], system_override: Optional[str] = None,
-        history: Optional[list[dict[str, str]]] = None) -> str:
+        history: Optional[list[dict[str, str]]] = None,
+        allow_web: bool = False) -> str:
     """Ask the LLM and return the answer text. Tries the primary model, then any
     `fallback_models` on failure. `history` is an optional list of prior
     {role, content} turns (for short conversational memory).
+
+    When `allow_web` is True and web_search is enabled in config, the model is
+    offered a `web_search` tool it may call for fresh/factual questions.
 
     Raises RuntimeError with a human-readable message if every model fails.
     """
@@ -170,9 +270,18 @@ def ask(question: str, cfg: dict[str, Any], system_override: Optional[str] = Non
     if not (c.get("base_url") or "").strip():
         raise RuntimeError("LLM не настроен: не задан base_url")
 
-    messages: list[dict[str, str]] = [
-        {"role": "system", "content": system_override or c["system_prompt"]}
-    ]
+    web = False
+    if allow_web:
+        try:
+            import web_search
+            web = web_search.is_enabled(cfg)
+        except Exception:
+            web = False
+
+    sys_content = system_override or c["system_prompt"]
+    if web:
+        sys_content += _WEB_HINT
+    messages: list[dict[str, Any]] = [{"role": "system", "content": sys_content}]
     for h in (history or [])[-8:]:
         role = h.get("role")
         content = (h.get("content") or "").strip()
@@ -184,6 +293,8 @@ def ask(question: str, cfg: dict[str, Any], system_override: Optional[str] = Non
     last_err: Optional[Exception] = None
     for i, model in enumerate(models):
         try:
+            if web:
+                return _run_tool_loop(c, model, messages, cfg)
             return _complete(c, model, messages)
         except RuntimeError as exc:
             last_err = exc
