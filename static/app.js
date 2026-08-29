@@ -114,6 +114,7 @@ $$(".tab-btn").forEach(btn => {
       refreshTelegramStatus();
       refreshTgStatusBot();
       refreshLlmStatus();
+      refreshWebSearchStatus();
       loadMqttConfig();
       refreshMqttStatus();
     } else if (CURRENT_TAB === "meshcore") {
@@ -2836,6 +2837,7 @@ async function init() {
   wireUpdatePanel();
   wireTgStatusBotPanel();
   wireLlmPanel();
+  wireWebSearchPanel();
   wireProxyPanel();
   wireNowcastPanel();
   wireMqttPanel();
@@ -3446,6 +3448,77 @@ async function testProxy() {
 }
 
 // ---------- LLM / AI assistant ----------
+
+function wireWebSearchPanel() {
+  $("#wsEnabled")?.addEventListener("change", async () => { await saveWebSearchConfig(); refreshWebSearchStatus(); });
+  $("#wsSave")?.addEventListener("click", async () => { await saveWebSearchConfig(); toast(t("Сохранено"), "ok"); refreshWebSearchStatus(); });
+  $("#wsTest")?.addEventListener("click", testWebSearch);
+}
+
+async function saveWebSearchConfig() {
+  const web_search = {
+    enabled:     $("#wsEnabled").checked,
+    provider:    $("#wsProvider").value || "duckduckgo",
+    max_results: Math.max(1, Math.min(10, parseInt($("#wsMaxResults").value, 10) || 5)),
+    region:      $("#wsRegion").value.trim() || "ru-ru",
+    searxng_url: $("#wsSearxngUrl").value.trim(),
+    proxy:       $("#wsProxy").value.trim(),
+  };
+  const key = $("#wsTavilyKey").value.trim();
+  if (key) web_search.tavily_api_key = key;
+  try {
+    await api("/api/config", { method: "POST", body: { web_search } });
+  } catch (e) { toast(e.message, "err"); }
+}
+
+async function refreshWebSearchStatus() {
+  let s;
+  try { s = await api("/api/websearch/status"); }
+  catch (e) { setWebSearchStatus("err", tf("Ошибка: {0}", e.message)); return; }
+  if (s.enabled && s.available) {
+    setWebSearchStatus("ok", tf("Включён · {0}", s.provider));
+  } else if (s.enabled && !s.available) {
+    setWebSearchStatus("warn", t("Включён, но провайдер не настроен (нужен URL/ключ)"));
+  } else {
+    setWebSearchStatus("idle", t("Выключен"));
+  }
+  if ($("#wsEnabled")) $("#wsEnabled").checked = !!s.enabled;
+  if (s.provider && $("#wsProvider")) $("#wsProvider").value = s.provider;
+  if (s.max_results != null && $("#wsMaxResults").value === "5") $("#wsMaxResults").value = s.max_results;
+  if (!$("#wsRegion").value) $("#wsRegion").value = s.region || "";
+  if (!$("#wsSearxngUrl").value) $("#wsSearxngUrl").value = s.searxng_url || "";
+  if (!$("#wsProxy").value) $("#wsProxy").value = s.proxy || "";
+  if (!$("#wsTavilyKey").value && s.tavily_key_set) $("#wsTavilyKey").placeholder = "(ключ сохранён — впиши чтобы заменить)";
+}
+
+function setWebSearchStatus(kind, text) {
+  const dot = $("#wsStatus .tg-dot");
+  const txt = $("#wsStatusText");
+  if (dot) dot.className = `tg-dot tg-dot-${kind}`;
+  if (txt) txt.textContent = text;
+}
+
+async function testWebSearch() {
+  const out = $("#wsTestResult");
+  out.hidden = false; out.className = "tg-test-result";
+  out.innerHTML = `<span class="muted">⏳ Сохраняю и проверяю поиск…</span>`;
+  await saveWebSearchConfig();
+  try {
+    const r = await api("/api/websearch/test", { method: "POST", body: { query: "новости сегодня" } });
+    if (r.ok) {
+      out.className = "tg-test-result ok";
+      const items = (r.results || []).map(x => `<div class="muted" style="margin-top:2px">• ${escapeHtml(x.title || "")}</div>`).join("");
+      out.innerHTML = `✅ <strong>Поиск работает</strong> · ${r.count} рез. · ${r.elapsed_seconds?.toFixed?.(1) ?? "?"} сек${items}`;
+    } else {
+      out.className = "tg-test-result err";
+      out.innerHTML = `❌ <strong>Не удалось</strong><div class="muted" style="margin-top:4px">${escapeHtml(r.error || "—")}</div>`;
+    }
+  } catch (e) {
+    out.className = "tg-test-result err";
+    out.innerHTML = `❌ ${escapeHtml(e.message)}`;
+  }
+  refreshWebSearchStatus();
+}
 
 function wireLlmPanel() {
   $("#llmEnabled")?.addEventListener("change", async (e) => {

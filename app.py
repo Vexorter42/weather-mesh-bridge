@@ -36,6 +36,7 @@ import weather
 import weather_alerts
 import rain_nowcast
 import space_weather
+import web_search
 import proxy_manager
 import mqtt_publisher
 from chat_db import ChatDb
@@ -53,7 +54,7 @@ logging.basicConfig(
 )
 log = logging.getLogger("weather-mesh-bridge")
 
-VERSION = "2.17.0"
+VERSION = "2.17.1"
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "config.json"
@@ -1500,6 +1501,8 @@ def api_set_config():
             cfg["telegram_status"] = {**TGS_DEFAULTS, **(cfg.get("telegram_status") or {}), **payload["telegram_status"]}
         if "llm" in payload:
             cfg["llm"] = {**llm.DEFAULTS, **(cfg.get("llm") or {}), **payload["llm"]}
+        if "web_search" in payload:
+            cfg["web_search"] = {**web_search.DEFAULTS, **(cfg.get("web_search") or {}), **payload["web_search"]}
         if "proxy" in payload:
             cfg["proxy"] = {**PROXY_DEFAULTS, **(cfg.get("proxy") or {}), **payload["proxy"]}
         # Resolve the central proxy into each service's own field before save,
@@ -2679,6 +2682,40 @@ def api_llm_status():
 def api_llm_test():
     """Verify connectivity/auth — asks the model to reply 'ok'."""
     return jsonify(llm.test_connection(load_config()))
+
+
+@app.route("/api/websearch/status", methods=["GET"])
+def api_websearch_status():
+    """Web-search config for the settings UI (tavily key not leaked)."""
+    c = {**web_search.DEFAULTS, **(load_config().get("web_search") or {})}
+    return jsonify({
+        "enabled": bool(c.get("enabled")),
+        "provider": c.get("provider") or "duckduckgo",
+        "max_results": c.get("max_results") or 5,
+        "region": c.get("region") or "ru-ru",
+        "proxy": c.get("proxy") or "",
+        "searxng_url": c.get("searxng_url") or "",
+        "tavily_key_set": bool(c.get("tavily_api_key")),
+        "available": web_search.is_enabled(load_config()),
+    })
+
+
+@app.route("/api/websearch/test", methods=["POST"])
+def api_websearch_test():
+    """Run a sample search to verify the configured provider works."""
+    import time
+    payload = request.get_json(force=True, silent=True) or {}
+    q = (payload.get("query") or "новости сегодня").strip()
+    t0 = time.time()
+    try:
+        results = web_search.search(q, load_config(), max_results=3)
+        return jsonify({
+            "ok": True, "count": len(results),
+            "elapsed_seconds": round(time.time() - t0, 2),
+            "results": [{"title": r.get("title"), "url": r.get("url")} for r in results],
+        })
+    except Exception as exc:
+        return jsonify({"ok": False, "elapsed_seconds": round(time.time() - t0, 2), "error": str(exc)})
 
 
 @app.route("/api/llm/ask", methods=["POST"])

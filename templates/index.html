@@ -829,6 +829,56 @@
           </div>
         </details>
 
+        <details class="experiment" id="experimentWebSearch">
+          <summary>
+            <label class="toggle-row" onclick="event.stopPropagation();">
+              <input type="checkbox" id="wsEnabled">
+              <span><strong>Веб-поиск для <code>/ai</code></strong> — модель ищет в интернете (новости, курсы, факты)</span>
+            </label>
+          </summary>
+          <div class="experiment-body">
+            <p class="hint">
+              Когда вопрос требует свежих данных, ИИ сам вызывает поиск (<code>web_search</code>) и при нужде открывает страницы (<code>web_fetch</code>) — отвечает по факту, а не из памяти. Также питает команду <code>/новости</code>.
+            </p>
+            <div class="tg-status" id="wsStatus">
+              <span class="tg-dot tg-dot-idle"></span>
+              <span id="wsStatusText">Загружаю состояние…</span>
+            </div>
+
+            <div class="profile-section">Провайдер</div>
+            <div class="grid2">
+              <label>Провайдер
+                <select id="wsProvider">
+                  <option value="duckduckgo">DuckDuckGo (без ключа)</option>
+                  <option value="searxng">SearXNG (self-hosted)</option>
+                  <option value="tavily">Tavily (ключ)</option>
+                </select>
+              </label>
+              <label>Результатов <small>(1–10)</small>
+                <input type="number" id="wsMaxResults" min="1" max="10" step="1" value="5">
+              </label>
+            </div>
+            <label>Регион <small>(например ru-ru)</small>
+              <input type="text" id="wsRegion" placeholder="ru-ru">
+            </label>
+            <label>SearXNG URL <small>(для провайдера SearXNG)</small>
+              <input type="text" id="wsSearxngUrl" placeholder="http://host:8080">
+            </label>
+            <label>Tavily API-ключ <small>(для провайдера Tavily; хранится локально в config.json)</small>
+              <input type="password" id="wsTavilyKey" placeholder="tvly-…" autocomplete="off">
+            </label>
+            <label>Прокси поиска <small>(socks5://… или http://…; пусто = напрямую. DDG обычно работает без прокси)</small>
+              <input type="text" id="wsProxy" placeholder="">
+            </label>
+
+            <div class="row">
+              <button id="wsSave">💾 Сохранить</button>
+              <button id="wsTest" class="ghost">🔍 Проверить поиск</button>
+            </div>
+            <div id="wsTestResult" class="tg-test-result" hidden></div>
+          </div>
+        </details>
+
         <details class="experiment" id="experimentMqtt">
           <summary>
             <label class="toggle-row" onclick="event.stopPropagation();">
