@@ -35,6 +35,7 @@ commands.BOT_START_TS = time.time()
 import weather
 import weather_alerts
 import rain_nowcast
+import space_weather
 import proxy_manager
 import mqtt_publisher
 from chat_db import ChatDb
@@ -52,7 +53,7 @@ logging.basicConfig(
 )
 log = logging.getLogger("weather-mesh-bridge")
 
-VERSION = "2.16.0"
+VERSION = "2.17.0"
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "config.json"
@@ -214,6 +215,7 @@ def load_config() -> dict[str, Any]:
             "commands": {"enabled": True, "reply_delay_min_s": 5, "reply_delay_max_s": 10},
             "alerts": dict(weather_alerts.DEFAULTS),
             "nowcast": dict(rain_nowcast.DEFAULTS),
+            "space_weather": dict(space_weather.DEFAULTS),
             "mqtt": dict(mqtt_publisher.DEFAULTS),
             "meshcore": dict(MESHCORE_DEFAULTS),
             "schedules": [],
@@ -297,6 +299,10 @@ weather_alerts.start_background_worker(load_config, BRIDGE, ALERTS_STATE)
 # Rain nowcast — "дождь идёт к тебе" via Open-Meteo minutely_15.
 NOWCAST_STATE = rain_nowcast.NowcastState(BASE_DIR / "nowcast_state.json")
 rain_nowcast.start_background_worker(load_config, BRIDGE, NOWCAST_STATE)
+
+# Space weather — geomagnetic storm / HF-propagation alerts (NOAA SWPC).
+SPACE_WEATHER_STATE = weather_alerts.AlertsState(BASE_DIR / "space_weather_state.json")
+space_weather.start_background_worker(load_config, BRIDGE, SPACE_WEATHER_STATE)
 
 
 def _mqtt_weather_state() -> Optional[dict[str, Any]]:
@@ -1482,6 +1488,8 @@ def api_set_config():
             cfg["alerts"] = {**weather_alerts.DEFAULTS, **(cfg.get("alerts") or {}), **payload["alerts"]}
         if "nowcast" in payload:
             cfg["nowcast"] = {**rain_nowcast.DEFAULTS, **(cfg.get("nowcast") or {}), **payload["nowcast"]}
+        if "space_weather" in payload:
+            cfg["space_weather"] = {**space_weather.DEFAULTS, **(cfg.get("space_weather") or {}), **payload["space_weather"]}
         if "mqtt" in payload:
             cfg["mqtt"] = {**mqtt_publisher.DEFAULTS, **(cfg.get("mqtt") or {}), **payload["mqtt"]}
         if "meshcore" in payload:

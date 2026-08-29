@@ -23,6 +23,8 @@ plain `requests`, no extra dependency.
 from __future__ import annotations
 
 import logging
+import re
+from html import unescape
 from typing import Any, Optional
 
 import requests
@@ -153,6 +155,34 @@ def _tavily(query: str, c: dict[str, Any], n: int) -> list[dict[str, str]]:
     return out
 
 
+def _html_to_text(html_text: str) -> str:
+    """Very light HTML → readable text (no bs4 dependency)."""
+    html_text = re.sub(r"(?is)<(script|style|head|nav|footer|svg|noscript)[^>]*>.*?</\1>", " ", html_text)
+    html_text = re.sub(r"(?is)<!--.*?-->", " ", html_text)
+    text = re.sub(r"(?s)<[^>]+>", " ", html_text)
+    text = unescape(text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def fetch_url(url: str, cfg: dict[str, Any], max_chars: int = 2500) -> str:
+    """Fetch a page and return its readable text (for the web_fetch tool)."""
+    c = _cfg(cfg)
+    url = (url or "").strip()
+    if not url.startswith(("http://", "https://")):
+        return "web_fetch: некорректный URL."
+    r = requests.get(
+        url,
+        headers={"User-Agent": "Mozilla/5.0 (weather-mesh-bridge)"},
+        proxies=_proxies(c.get("proxy") or ""),
+        timeout=int(c.get("timeout_seconds") or 12),
+    )
+    r.raise_for_status()
+    ctype = (r.headers.get("Content-Type") or "").lower()
+    if not any(t in ctype for t in ("html", "text", "json", "xml")):
+        return f"web_fetch: не текстовая страница ({ctype or '?'})."
+    return _html_to_text(r.text)[:max_chars]
+
+
 def format_results(results: list[dict[str, str]], max_chars: int = 1500) -> str:
     """Compact text block fed back to the model as the tool result."""
     if not results:
@@ -167,4 +197,4 @@ def format_results(results: list[dict[str, str]], max_chars: int = 1500) -> str:
     return "\n\n".join(lines)[:max_chars]
 
 
-__all__ = ["search", "format_results", "is_enabled", "provider_name", "DEFAULTS"]
+__all__ = ["search", "fetch_url", "format_results", "is_enabled", "provider_name", "DEFAULTS"]

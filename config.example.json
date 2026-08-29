@@ -51,5 +51,11 @@
     "proxy": "",
     "searxng_url": "",
     "tavily_api_key": ""
+  },
+  "space_weather": {
+    "enabled": false,
+    "kp_alert_threshold": 5,
+    "check_interval_minutes": 30,
+    "use_proxy": true
   }
 }

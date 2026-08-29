@@ -14,6 +14,8 @@ from typing import Any, Callable, Optional
 
 import weather
 import llm
+import space_weather
+import web_search
 
 # Set when app.py starts up — used by /uptime.
 BOT_START_TS: float = time.time()
@@ -442,6 +444,54 @@ def cmd_ai(args, msg, bridge, cfg):
         _ai_remember(node_id, "user", question)
         _ai_remember(node_id, "assistant", answer)
     return answer
+
+
+@command(
+    "новости", "news", "сводка_новостей",
+    help_text="/новости [тема] — краткая сводка новостей от ИИ (ищет в интернете)",
+)
+def cmd_news(args, msg, bridge, cfg):
+    """News digest via web search + LLM summarisation, kept mesh-short."""
+    if not llm.is_enabled(cfg):
+        return "ИИ выключен или не настроен."
+    if not web_search.is_enabled(cfg):
+        return "Веб-поиск выключен — включи его в настройках."
+    topic = " ".join(args).strip()
+    city = ((cfg.get("location") or {}).get("name") or "").strip()
+    if topic:
+        subject = topic
+    elif city:
+        subject = f"главные новости {city} и России"
+    else:
+        subject = "главные новости России"
+    sys_prompt = (
+        "Ты — новостной дайджест для LoRa-рации. Найди через web_search свежие "
+        "новости по теме и выдай КРАТКУЮ сводку: 2–4 главных пункта, каждый — одно "
+        "короткое предложение, через перенос строки. Без ссылок, без markdown, без "
+        "воды. Только реальные факты из поиска, за сегодня. По-русски."
+    )
+    question = (f"Сводка новостей: {subject}. "
+                f"Сегодня {datetime.now().strftime('%d.%m.%Y')}.")
+    try:
+        return llm.ask(question, cfg, system_override=sys_prompt, allow_web=True)
+    except Exception as exc:
+        log.warning("/новости failed: %s", exc)
+        return f"Не смог собрать новости: {exc}"
+
+
+@command(
+    "космос", "space", "пропагация", "kp",
+    help_text="/космос — космическая погода (Kp-индекс, солнечный ветер, пропагация)",
+)
+def cmd_space(args, msg, bridge, cfg):
+    """Current space weather from NOAA SWPC — Kp index, F10.7 flux, solar wind.
+    Relevant for HF/radio propagation and aurora."""
+    space_weather.apply_proxy(cfg)
+    try:
+        return space_weather.format_message()
+    except Exception as exc:
+        log.warning("/космос failed: %s", exc)
+        return f"Космопогода недоступна: {exc}"
 
 
 @command(

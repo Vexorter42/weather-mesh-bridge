@@ -54,11 +54,33 @@ WEB_SEARCH_TOOL = {
         },
     },
 }
+WEB_FETCH_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "web_fetch",
+        "description": (
+            "Открыть веб-страницу по URL и получить её текст. Вызывай после "
+            "web_search, когда в сниппетах нет точного факта/числа и его надо "
+            "достать прямо со страницы."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "url": {
+                    "type": "string",
+                    "description": "URL страницы (обычно из результатов web_search)",
+                },
+            },
+            "required": ["url"],
+        },
+    },
+}
 _WEB_HINT = (
-    "\n\nУ тебя есть инструмент web_search. Если для точного ответа нужны свежие "
-    "данные из интернета (новости, события, цены, факты после обучения) — вызови "
-    "его с коротким точным запросом и опирайся на результаты, не выдумывай. "
-    "Финальный ответ всё равно держи коротким."
+    "\n\nУ тебя есть инструменты web_search (поиск) и web_fetch (открыть страницу). "
+    "Если для точного ответа нужны свежие данные из интернета (новости, события, "
+    "цены, факты после обучения) — ищи через web_search, а если в сниппетах нет "
+    "конкретного факта — открой нужную ссылку через web_fetch. Опирайся на "
+    "результаты, не выдумывай. Финальный ответ всё равно держи коротким."
 )
 
 DEFAULTS = {
@@ -219,7 +241,7 @@ def _run_tool_loop(c: dict[str, Any], model: str,
 
     msgs: list[dict[str, Any]] = list(messages)
     for step in range(MAX_TOOL_ITERS + 1):
-        tools = [WEB_SEARCH_TOOL] if step < MAX_TOOL_ITERS else None
+        tools = [WEB_SEARCH_TOOL, WEB_FETCH_TOOL] if step < MAX_TOOL_ITERS else None
         message = _post_chat(c, model, msgs, tools=tools)
         tool_calls = message.get("tool_calls") or []
         if not tool_calls:
@@ -242,6 +264,14 @@ def _run_tool_loop(c: dict[str, Any], model: str,
                 except Exception as exc:
                     content = f"Ошибка поиска: {exc}"
                     log.warning("/ai web_search «%s» failed: %s", query, exc)
+            elif name == "web_fetch":
+                url = (_parse_tool_args(fn.get("arguments")).get("url") or "").strip()
+                try:
+                    content = web_search.fetch_url(url, cfg)
+                    log.info("/ai web_fetch «%s» → %d симв.", url, len(content))
+                except Exception as exc:
+                    content = f"Ошибка загрузки страницы: {exc}"
+                    log.warning("/ai web_fetch «%s» failed: %s", url, exc)
             else:
                 content = f"Неизвестный инструмент: {name}"
             msgs.append({"role": "tool", "tool_call_id": tc.get("id"),
