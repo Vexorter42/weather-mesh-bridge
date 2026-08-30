@@ -57,5 +57,12 @@
     "kp_alert_threshold": 5,
     "check_interval_minutes": 30,
     "use_proxy": true
+  },
+  "stt": {
+    "enabled": false,
+    "url": "",
+    "language": "ru",
+    "voice_to_mesh": false,
+    "timeout_seconds": 90
   }
 }

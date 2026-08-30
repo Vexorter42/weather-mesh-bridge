@@ -37,6 +37,7 @@ import weather_alerts
 import rain_nowcast
 import space_weather
 import web_search
+import stt
 import proxy_manager
 import mqtt_publisher
 from chat_db import ChatDb
@@ -54,7 +55,7 @@ logging.basicConfig(
 )
 log = logging.getLogger("weather-mesh-bridge")
 
-VERSION = "2.17.1"
+VERSION = "2.18.0"
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "config.json"
@@ -1503,6 +1504,8 @@ def api_set_config():
             cfg["llm"] = {**llm.DEFAULTS, **(cfg.get("llm") or {}), **payload["llm"]}
         if "web_search" in payload:
             cfg["web_search"] = {**web_search.DEFAULTS, **(cfg.get("web_search") or {}), **payload["web_search"]}
+        if "stt" in payload:
+            cfg["stt"] = {**stt.DEFAULTS, **(cfg.get("stt") or {}), **payload["stt"]}
         if "proxy" in payload:
             cfg["proxy"] = {**PROXY_DEFAULTS, **(cfg.get("proxy") or {}), **payload["proxy"]}
         # Resolve the central proxy into each service's own field before save,
