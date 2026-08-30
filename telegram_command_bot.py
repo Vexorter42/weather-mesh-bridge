@@ -26,8 +26,6 @@ from typing import Any, Callable, Optional
 
 import requests
 
-import stt
-
 log = logging.getLogger(__name__)
 
 TG_API = "https://api.telegram.org"
@@ -165,50 +163,6 @@ class TelegramCommandBot:
         self._call("sendMessage", {"chat_id": chat_id, "text": text[:4000],
                                    "disable_web_page_preview": True})
 
-    def _download_file(self, file_path: str) -> Optional[bytes]:
-        token = self._tgs().get("bot_token")
-        if not token:
-            return None
-        try:
-            r = requests.get(f"{TG_API}/file/bot{token}/{file_path}",
-                             proxies=_proxies_from(self._cfg), timeout=30)
-            r.raise_for_status()
-            return r.content
-        except Exception as exc:
-            self._last_error = str(exc)
-            return None
-
-    def _handle_voice(self, voice: dict, chat) -> None:
-        """Transcribe a Telegram voice note via the STT service and reply."""
-        fi = self._call("getFile", {"file_id": voice.get("file_id")}, timeout=15)
-        if not fi or not fi.get("file_path"):
-            self._send(chat, "🎤 Не смог получить голосовое.")
-            return
-        audio = self._download_file(fi["file_path"])
-        if not audio:
-            self._send(chat, "🎤 Не смог скачать голосовое.")
-            return
-        self._send(chat, "🎤 Распознаю…")
-        try:
-            text = stt.transcribe(audio, self._cfg())
-        except Exception as exc:
-            log.warning("STT failed: %s", exc)
-            self._send(chat, f"🎤 Ошибка распознавания: {exc}")
-            return
-        if not text:
-            self._send(chat, "🎤 Ничего не распознал.")
-            return
-        self._send(chat, f"🎤 Распознано:\n{text}")
-        self._handled += 1
-        # Optional: admins can have their voice notes broadcast to mesh.
-        c = {**stt.DEFAULTS, **(self._cfg().get("stt") or {})}
-        if c.get("voice_to_mesh") and self._is_admin(chat):
-            try:
-                self._p["send_mesh"](text[:200])
-                self._send(chat, "📡 Отправлено в mesh.")
-            except Exception as exc:
-                self._send(chat, f"⚠️ В mesh не ушло: {exc}")
-
     def _drain_backlog(self):
         """Skip messages that arrived before the bot came up."""
         res = self._call("getUpdates", {"timeout": 0, "offset": -1}, timeout=10)
@@ -245,15 +199,8 @@ class TelegramCommandBot:
     # ------------------------------------------------------------------
 
     def _handle(self, msg: dict):
-        chat = (msg.get("chat") or {}).get("id")
-        voice = msg.get("voice") or msg.get("audio")
-        if voice and chat is not None and stt.is_enabled(self._cfg()):
-            try:
-                self._handle_voice(voice, chat)
-            except Exception:
-                log.exception("voice handler crashed")
-            return
         text = (msg.get("text") or "").strip()
+        chat = (msg.get("chat") or {}).get("id")
         if not text or not text.startswith("/") or chat is None:
             return
         head, _, rest = text.partition(" ")
