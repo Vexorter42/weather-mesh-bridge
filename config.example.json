@@ -57,5 +57,13 @@
     "kp_alert_threshold": 5,
     "check_interval_minutes": 30,
     "use_proxy": true
+  },
+  "repeater_watch": {
+    "enabled": false,
+    "gone_after_minutes": 120,
+    "check_interval_minutes": 15,
+    "channel_name": "",
+    "notify_recovery": true,
+    "only": []
   }
 }

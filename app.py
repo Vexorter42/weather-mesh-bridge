@@ -37,6 +37,7 @@ import weather_alerts
 import rain_nowcast
 import space_weather
 import web_search
+import repeater_watch
 import proxy_manager
 import mqtt_publisher
 from chat_db import ChatDb
@@ -54,7 +55,7 @@ logging.basicConfig(
 )
 log = logging.getLogger("weather-mesh-bridge")
 
-VERSION = "2.18.1"
+VERSION = "2.19.0"
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "config.json"
@@ -217,6 +218,7 @@ def load_config() -> dict[str, Any]:
             "alerts": dict(weather_alerts.DEFAULTS),
             "nowcast": dict(rain_nowcast.DEFAULTS),
             "space_weather": dict(space_weather.DEFAULTS),
+            "repeater_watch": dict(repeater_watch.DEFAULTS),
             "mqtt": dict(mqtt_publisher.DEFAULTS),
             "meshcore": dict(MESHCORE_DEFAULTS),
             "schedules": [],
@@ -814,6 +816,9 @@ BRIDGE.set_mirror_callback(_mirror_to_meshcore)
 MESHCORE.set_command_handler(_handle_meshcore_command)
 MESHCORE.set_message_callback(_relay_meshcore_to_tg)
 MESHCORE.start()
+# MeshCore repeater watch — alert when a repeater goes silent (no admin login).
+REPEATER_STATE = repeater_watch.RepeaterState(BASE_DIR / "repeater_watch_state.json")
+repeater_watch.start_background_worker(load_config, MESHCORE, REPEATER_STATE)
 _start_meshcoretel_relay()
 _start_relay_command_poller()
 _start_relay_pin_updater()
@@ -1503,6 +1508,8 @@ def api_set_config():
             cfg["llm"] = {**llm.DEFAULTS, **(cfg.get("llm") or {}), **payload["llm"]}
         if "web_search" in payload:
             cfg["web_search"] = {**web_search.DEFAULTS, **(cfg.get("web_search") or {}), **payload["web_search"]}
+        if "repeater_watch" in payload:
+            cfg["repeater_watch"] = {**repeater_watch.DEFAULTS, **(cfg.get("repeater_watch") or {}), **payload["repeater_watch"]}
         if "proxy" in payload:
             cfg["proxy"] = {**PROXY_DEFAULTS, **(cfg.get("proxy") or {}), **payload["proxy"]}
         # Resolve the central proxy into each service's own field before save,
@@ -2490,6 +2497,36 @@ def api_meshcore_test():
     payload = request.get_json(force=True, silent=True) or {}
     text = (payload.get("text") or "🔧 Тест из weather-mesh-bridge").strip()
     return jsonify(MESHCORE.send_channel(text, wait=True))
+
+
+@app.route("/api/meshcore/probe", methods=["GET"])
+def api_meshcore_probe():
+    """Request a repeater/node STATUS (battery, queue, rssi…) by contact name."""
+    name = (request.args.get("name") or "").strip()
+    if not name:
+        return jsonify({"ok": False, "error": "укажи ?name=<имя репитера>"}), 400
+    return jsonify(MESHCORE.probe_status(name))
+
+
+@app.route("/api/meshcore/contacts", methods=["GET"])
+def api_meshcore_contacts():
+    """Raw MeshCore contact snapshot (for repeater last-seen monitoring)."""
+    return jsonify({"contacts": MESHCORE.list_contacts()})
+
+
+@app.route("/api/meshcore/repeater_check", methods=["GET"])
+def api_meshcore_repeater_check():
+    """Dry list of repeaters (type 2) with how long each has been silent."""
+    now = int(time.time())
+    rows = []
+    for ct in MESHCORE.list_contacts(refresh=True):
+        if ct.get("type") != repeater_watch.REPEATER_TYPE:
+            continue
+        last = int(ct.get("last_advert") or 0)
+        rows.append({"name": ct.get("adv_name"),
+                     "age_min": (now - last) // 60 if last else None})
+    rows.sort(key=lambda r: -(r["age_min"] if r["age_min"] is not None else -1))
+    return jsonify({"repeaters": rows})
 
 
 @app.route("/api/stats", methods=["GET"])

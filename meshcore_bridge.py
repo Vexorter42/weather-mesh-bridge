@@ -599,6 +599,63 @@ class MeshCoreBridge:
             return {"ok": False, "error": f"канал «{name}» не найден"}
         return self.send_channel(text, channel_index=idx, wait=wait)
 
+    def _repeater_password(self, name: str) -> str:
+        """Admin password for a repeater (per-name override, else shared default)."""
+        c = self._mc_cfg()
+        per = c.get("repeater_passwords") or {}
+        return (per.get(name) or c.get("repeater_password") or "").strip()
+
+    def list_contacts(self, refresh: bool = False) -> list[dict]:
+        """Raw snapshot of known contacts (for monitoring — repeater last-seen).
+        refresh=True re-reads the contact table from the Companion node first."""
+        if refresh and self._loop and self._connected:
+            try:
+                fut = asyncio.run_coroutine_threadsafe(self._load_contacts(), self._loop)
+                fut.result(timeout=15)
+            except Exception as exc:
+                log.debug("contacts refresh failed: %s", exc)
+        try:
+            return list((getattr(self._mc, "_contacts", {}) or {}).values())
+        except Exception as exc:
+            log.debug("list_contacts failed: %s", exc)
+            return []
+
+    def probe_status(self, name: str, timeout: float = 30.0) -> dict:
+        """Request a repeater/node STATUS (battery, queue, rssi…) by contact name.
+        Blocking — schedules on the async loop. Returns {ok, name, status|error}."""
+        if not self._loop or not self._connected:
+            return {"ok": False, "error": self._last_error or "не подключено"}
+        try:
+            fut = asyncio.run_coroutine_threadsafe(self._probe_status_coro(name), self._loop)
+            return fut.result(timeout=timeout + 5)
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    async def _probe_status_coro(self, name: str) -> dict:
+        contact = self._find_contact(name)
+        if not contact:
+            return {"ok": False, "error": f"контакт «{name}» не найден"}
+        disp = contact.get("adv_name") or name
+        # Repeaters only reveal status/telemetry after an admin login.
+        pwd = self._repeater_password(disp)
+        logged_in = None
+        if pwd:
+            try:
+                lev = await self._mc.commands.send_login_sync(contact, pwd, timeout=20)
+                logged_in = not (EventType is not None and getattr(lev, "type", None) == EventType.ERROR)
+            except Exception as exc:
+                log.info("MeshCore login to %s failed: %s", disp, exc)
+                logged_in = False
+        try:
+            ev = await self._mc.commands.req_status_sync(contact, timeout=25)
+        except Exception as exc:
+            return {"ok": False, "name": disp, "logged_in": logged_in, "error": f"req_status: {exc}"}
+        if ev is None or (EventType is not None and getattr(ev, "type", None) == EventType.ERROR):
+            hint = "" if pwd else " (нужен админ-пароль репитера в конфиге)"
+            return {"ok": False, "name": disp, "logged_in": logged_in,
+                    "error": "нет ответа (STATUS_RESPONSE не пришёл)" + hint}
+        return {"ok": True, "name": disp, "logged_in": logged_in, "status": getattr(ev, "payload", None)}
+
     def channels(self, refresh: bool = False) -> list[dict]:
         """Cached channel table [{index, name}]. refresh=True re-reads the node."""
         if refresh and self._loop and self._connected:
