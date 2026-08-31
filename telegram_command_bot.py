@@ -26,6 +26,9 @@ from typing import Any, Callable, Optional
 
 import requests
 
+import llm
+import commands
+
 log = logging.getLogger(__name__)
 
 TG_API = "https://api.telegram.org"
@@ -163,6 +166,26 @@ class TelegramCommandBot:
         self._call("sendMessage", {"chat_id": chat_id, "text": text[:4000],
                                    "disable_web_page_preview": True})
 
+    def _send_long(self, chat_id, text: str):
+        """Send a long reply split into Telegram-sized chunks (no truncation)."""
+        text = (text or "").strip()
+        if not text:
+            self._send(chat_id, "(пустой ответ)")
+            return
+        LIMIT = 3900
+        while text:
+            if len(text) <= LIMIT:
+                chunk, text = text, ""
+            else:
+                cut = text.rfind("\n", 0, LIMIT)
+                if cut < LIMIT // 2:
+                    cut = text.rfind(" ", 0, LIMIT)
+                if cut < LIMIT // 2:
+                    cut = LIMIT
+                chunk, text = text[:cut], text[cut:].lstrip("\n")
+            self._call("sendMessage", {"chat_id": chat_id, "text": chunk,
+                                       "disable_web_page_preview": True})
+
     def _drain_backlog(self):
         """Skip messages that arrived before the bot came up."""
         res = self._call("getUpdates", {"timeout": 0, "offset": -1}, timeout=10)
@@ -211,6 +234,7 @@ class TelegramCommandBot:
             "/mesh": self._cmd_mesh, "/nodes": self._cmd_nodes,
             "/seen": self._cmd_seen, "/route": self._cmd_route,
             "/weather": self._cmd_weather, "/air": self._cmd_air,
+            "/ai": self._cmd_ai, "/ии": self._cmd_ai, "/gpt": self._cmd_ai, "/спроси": self._cmd_ai,
             "/traffic": self._cmd_traffic, "/activity": self._cmd_activity,
             "/subscribe": self._cmd_subscribe, "/unsubscribe": self._cmd_unsubscribe,
             "/daily": self._cmd_daily, "/settings": self._cmd_settings,
@@ -254,7 +278,8 @@ class TelegramCommandBot:
             "/seen <имя> — карточка узла\n"
             "/route <имя> — маршрут до узла\n\n"
             "🌦 Сервисы\n"
-            "/weather — погода\n\n"
+            "/weather — погода\n"
+            "/ai <вопрос> — спросить ИИ (полный ответ, с поиском в сети)\n\n"
             "🔔 Подписки (в этот чат)\n"
             "/subscribe — алерты (гроза, дождь…)\n"
             "/daily — ежедневная сводка\n"
@@ -273,6 +298,46 @@ class TelegramCommandBot:
                 "/restart — перезапуск"
             )
         return base
+
+    def _cmd_ai(self, arg, chat=None):
+        """Ask the LLM from Telegram — full answer, no mesh length cap.
+        Runs in a worker thread so a slow answer doesn't block the poll loop."""
+        q = (arg or "").strip()
+        if not q:
+            return "Использование: /ai <вопрос> — спросить ИИ (ответ без ограничения длины)."
+        if not llm.is_enabled(self._cfg()):
+            return "ИИ выключен или не настроен (в веб-морде: Интеграции → ИИ-ассистент)."
+        self._send(chat, "🤖 Думаю…")
+        threading.Thread(target=self._ai_worker, args=(q, chat),
+                         daemon=True, name="tg-ai").start()
+        return None
+
+    def _ai_worker(self, q: str, chat):
+        cfg = self._cfg()
+        # Telegram: full-length answer — drop the mesh char cap, more tokens, longer timeout.
+        tcfg = dict(cfg)
+        tl = dict(tcfg.get("llm") or {})
+        tl["max_reply_chars"] = 100000
+        tl["max_tokens"] = max(int(tl.get("max_tokens") or 200), 1500)
+        tl["timeout_seconds"] = max(int(tl.get("timeout_seconds") or 40), 150)
+        tcfg["llm"] = tl
+        sys_prompt = ("Ты — полезный ИИ-ассистент в Telegram. Отвечай по-русски, "
+                      "развёрнуто и по делу; ограничения на длину ответа нет. "
+                      "Без лишней воды и без выдумок.")
+        try:
+            sit = commands._situation_context(cfg, None)
+            if sit:
+                sys_prompt += "\n\nАктуальные данные на сейчас (опирайся на них, не выдумывай):\n" + sit
+        except Exception:
+            pass
+        try:
+            answer = llm.ask(q, tcfg, system_override=sys_prompt, allow_web=True)
+        except Exception as exc:
+            log.warning("/ai (telegram) failed: %s", exc)
+            self._send(chat, f"ИИ недоступен: {exc}")
+            return
+        self._send_long(chat, answer)
+        self._handled += 1
 
     def _nodes(self) -> list[dict]:
         try:
