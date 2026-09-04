@@ -186,6 +186,18 @@ class TelegramCommandBot:
             self._call("sendMessage", {"chat_id": chat_id, "text": chunk,
                                        "disable_web_page_preview": True})
 
+    def _send_get_id(self, chat_id, text: str):
+        r = self._call("sendMessage", {"chat_id": chat_id, "text": text[:4000],
+                                       "disable_web_page_preview": True})
+        return (r or {}).get("message_id")
+
+    def _edit(self, chat_id, message_id, text: str):
+        if message_id is None:
+            self._send(chat_id, text)
+            return
+        self._call("editMessageText", {"chat_id": chat_id, "message_id": message_id,
+                                       "text": text[:4000], "disable_web_page_preview": True})
+
     def _drain_backlog(self):
         """Skip messages that arrived before the bot came up."""
         res = self._call("getUpdates", {"timeout": 0, "offset": -1}, timeout=10)
@@ -330,13 +342,41 @@ class TelegramCommandBot:
                 sys_prompt += "\n\nАктуальные данные на сейчас (опирайся на них, не выдумывай):\n" + sit
         except Exception:
             pass
+
+        msg_id = self._send_get_id(chat, "🤖 Думаю…")
+        # Live "typing": edit the placeholder as the answer streams in (throttled
+        # so we don't hit Telegram's edit rate limit).
+        state = {"last": 0.0, "shown": ""}
+
+        def on_delta(text):
+            t = (text or "")[:4000]
+            if not t or t == state["shown"]:
+                return
+            now = time.time()
+            if now - state["last"] < 1.5 and (len(t) - len(state["shown"])) < 350:
+                return
+            state["last"] = now
+            state["shown"] = t
+            self._edit(chat, msg_id, t)
+
         try:
-            answer = llm.ask(q, tcfg, system_override=sys_prompt, allow_web=True)
+            answer = llm.ask_stream(q, tcfg, on_delta, system_override=sys_prompt, allow_web=True)
         except Exception as exc:
             log.warning("/ai (telegram) failed: %s", exc)
-            self._send(chat, f"ИИ недоступен: {exc}")
+            self._edit(chat, msg_id, f"ИИ недоступен: {exc}")
             return
-        self._send_long(chat, answer)
+        answer = (answer or "").strip()
+        if len(answer) <= 4000:
+            if answer and answer != state["shown"]:
+                self._edit(chat, msg_id, answer)
+        else:
+            cut = answer.rfind("\n", 0, 4000)
+            if cut < 2000:
+                cut = answer.rfind(" ", 0, 4000)
+            if cut < 2000:
+                cut = 4000
+            self._edit(chat, msg_id, answer[:cut])
+            self._send_long(chat, answer[cut:].lstrip("\n"))
         self._handled += 1
 
     def _nodes(self) -> list[dict]:
