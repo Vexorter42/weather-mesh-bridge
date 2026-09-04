@@ -55,7 +55,7 @@ logging.basicConfig(
 )
 log = logging.getLogger("weather-mesh-bridge")
 
-VERSION = "2.21.1"
+VERSION = "2.21.2"
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "config.json"
