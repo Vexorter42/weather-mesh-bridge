@@ -353,7 +353,7 @@ class TelegramCommandBot:
             if not t or t == state["shown"]:
                 return
             now = time.time()
-            if now - state["last"] < 1.5 and (len(t) - len(state["shown"])) < 350:
+            if now - state["last"] < 1.5:   # ≤1 edit / 1.5s — Telegram edit rate limit
                 return
             state["last"] = now
             state["shown"] = t

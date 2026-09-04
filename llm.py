@@ -360,9 +360,10 @@ def _stream_chat(c: dict[str, Any], model: str, messages: list[dict[str, Any]],
     content = ""
     tcs: dict[int, dict] = {}
     finish = None
-    for line in r.iter_lines(decode_unicode=True):
-        if not line:
+    for raw in r.iter_lines():  # bytes — decode UTF-8 ourselves (SSE has no charset → requests guesses Latin-1)
+        if not raw:
             continue
+        line = raw.decode("utf-8", "replace")
         if line.startswith("data:"):
             line = line[5:].strip()
         if line == "[DONE]":
