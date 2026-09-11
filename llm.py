@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any, Optional
 
 import requests
@@ -202,9 +203,34 @@ def _cap(c: dict[str, Any], text: str) -> str:
     return text
 
 
+_THINK_BLOCK = re.compile(r"<think\b[^>]*>.*?</think>", re.DOTALL | re.IGNORECASE)
+_THINK_OPEN = re.compile(r"<think\b[^>]*>", re.IGNORECASE)
+
+
+def _strip_think(text: str) -> str:
+    """Remove reasoning/thinking traces that leak into the answer.
+
+    Qwen3 (and other reasoning models) can emit <think>…</think> despite
+    /no_think, and ollama's OpenAI endpoint sometimes drops the opening tag but
+    leaves the reasoning text plus a dangling </think> in `content` (that's the
+    stray Chinese + </think> users saw). Strip all three shapes deterministically.
+    """
+    if not text:
+        return text
+    text = _THINK_BLOCK.sub("", text)          # well-formed <think>…</think>
+    low = text.lower()
+    idx = low.rfind("</think>")                # dangling close (open tag was eaten)
+    if idx != -1:
+        text = text[idx + len("</think>"):]
+    m = _THINK_OPEN.search(text)              # stray unclosed <think>
+    if m:
+        text = text[:m.start()]
+    return text.strip()
+
+
 def _message_text(c: dict[str, Any], message: dict[str, Any]) -> str:
     """Extract non-empty capped text from an assistant message, else raise."""
-    text = (message.get("content") or "").strip()
+    text = _strip_think((message.get("content") or "").strip())
     if not text:
         # Reasoning/"thinking" models can burn the whole token budget on internal
         # reasoning and return empty content.
