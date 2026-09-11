@@ -35,6 +35,10 @@ log = logging.getLogger(__name__)
 
 TG_API = "https://api.telegram.org"
 
+AI_MEM_TTL = 1800          # /ai memory: forget a chat after this many idle seconds
+AI_MEM_MAX_TURNS = 20      # hard cap on the configurable memory depth
+AI_MSG_CAP = 2000          # cap each remembered message (chars) to bound context
+
 # --- Markdown (LLM output) -> Telegram HTML ------------------------------
 # The LLM answers in GitHub-flavoured Markdown (**bold**, ## headings, `code`,
 # [text](url)). Telegram doesn't render that as-is, so translate the subset
@@ -116,6 +120,13 @@ class TelegramCommandBot:
         self._subs_lock = threading.Lock()
         self._last_alert_ts = int(time.time())   # don't replay history on boot
         self._last_daily = ""                    # YYYY-MM-DD of last daily send
+        # Per-chat /ai conversational memory (RAM only): {chat_id: {"msgs":[…], "ts":float}}
+        self._ai_mem: dict[str, dict] = {}
+        self._ai_mem_lock = threading.Lock()
+        # Bot-wide admin-tunable settings, persisted next to the subscribers file.
+        self._settings_path = (self._subs_path.with_name("tg_bot_settings.json")
+                               if self._subs_path else None)
+        self._settings: dict = self._load_settings()
 
     # ---- subscriptions store ----
     def _load_subs(self) -> dict:
@@ -137,6 +148,75 @@ class TelegramCommandBot:
             tmp.replace(self._subs_path)
         except Exception:
             log.exception("failed to save subscribers")
+
+    # ---- bot settings store ----
+    def _load_settings(self) -> dict:
+        import json
+        try:
+            if self._settings_path and self._settings_path.exists():
+                return json.loads(self._settings_path.read_text(encoding="utf-8"))
+        except Exception:
+            log.exception("failed to read bot settings")
+        return {}
+
+    def _save_settings(self):
+        import json
+        if not self._settings_path:
+            return
+        try:
+            tmp = self._settings_path.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(self._settings, ensure_ascii=False, indent=2), encoding="utf-8")
+            tmp.replace(self._settings_path)
+        except Exception:
+            log.exception("failed to save bot settings")
+
+    # ---- /ai conversational memory ----
+    def _memory_turns(self) -> int:
+        """How many prior /ai exchanges to remember (0 = off). Admin setting wins,
+        else config telegram_status.ai_memory_turns, else default 5."""
+        v = self._settings.get("ai_memory_turns")
+        if v is None:
+            v = self._tgs().get("ai_memory_turns", 5)
+        try:
+            n = int(v)
+        except (TypeError, ValueError):
+            n = 5
+        return max(0, min(n, AI_MEM_MAX_TURNS))
+
+    def _ai_history(self, chat) -> list[dict]:
+        cid = str(chat)
+        with self._ai_mem_lock:
+            rec = self._ai_mem.get(cid)
+            if not rec:
+                return []
+            if time.time() - rec.get("ts", 0) > AI_MEM_TTL:
+                self._ai_mem.pop(cid, None)
+                return []
+            return list(rec.get("msgs") or [])
+
+    def _ai_remember(self, chat, question: str, answer: str):
+        turns = self._memory_turns()
+        if turns <= 0:
+            return
+        q = (question or "").strip()[:AI_MSG_CAP]
+        a = (answer or "").strip()[:AI_MSG_CAP]
+        if not q or not a:
+            return
+        cid = str(chat)
+        with self._ai_mem_lock:
+            rec = self._ai_mem.get(cid)
+            if not rec or time.time() - rec.get("ts", 0) > AI_MEM_TTL:
+                rec = {"msgs": [], "ts": 0}
+            msgs = rec["msgs"]
+            msgs.append({"role": "user", "content": q})
+            msgs.append({"role": "assistant", "content": a})
+            del msgs[:-2 * turns]          # keep only the last N exchanges
+            rec["msgs"], rec["ts"] = msgs, time.time()
+            self._ai_mem[cid] = rec
+
+    def _ai_forget(self, chat) -> bool:
+        with self._ai_mem_lock:
+            return self._ai_mem.pop(str(chat), None) is not None
 
     def _sub(self, chat_id, key: str, value: bool):
         cid = str(chat_id)
@@ -290,6 +370,8 @@ class TelegramCommandBot:
             "/seen": self._cmd_seen, "/route": self._cmd_route,
             "/weather": self._cmd_weather, "/air": self._cmd_air,
             "/ai": self._cmd_ai, "/ии": self._cmd_ai, "/gpt": self._cmd_ai, "/спроси": self._cmd_ai,
+            "/forget": self._cmd_forget, "/забудь": self._cmd_forget, "/reset": self._cmd_forget,
+            "/aimemory": self._cmd_aimemory, "/память": self._cmd_aimemory,
             "/traffic": self._cmd_traffic, "/activity": self._cmd_activity,
             "/subscribe": self._cmd_subscribe, "/unsubscribe": self._cmd_unsubscribe,
             "/daily": self._cmd_daily, "/settings": self._cmd_settings,
@@ -334,7 +416,8 @@ class TelegramCommandBot:
             "/route <имя> — маршрут до узла\n\n"
             "🌦 Сервисы\n"
             "/weather — погода\n"
-            "/ai <вопрос> — спросить ИИ (полный ответ, с поиском в сети)\n\n"
+            "/ai <вопрос> — спросить ИИ (помнит контекст беседы, с поиском в сети)\n"
+            "/forget — забыть контекст беседы с ИИ\n\n"
             "🔔 Подписки (в этот чат)\n"
             "/subscribe — алерты (гроза, дождь…)\n"
             "/daily — ежедневная сводка\n"
@@ -349,6 +432,7 @@ class TelegramCommandBot:
                 "/say — отправить в mesh\n"
                 "/announce — объявление подписчикам\n"
                 "/status — состояние бота\n"
+                "/aimemory — глубина памяти /ai\n"
                 "/sendreport — разослать отчёт\n"
                 "/restart — перезапуск"
             )
@@ -385,14 +469,24 @@ class TelegramCommandBot:
                 sys_prompt += "\n\nАктуальные данные на сейчас (опирайся на них, не выдумывай):\n" + sit
         except Exception:
             pass
+        hist = self._ai_history(chat) if self._memory_turns() > 0 else None
         try:
-            answer = llm.ask(q, tcfg, system_override=sys_prompt, allow_web=True)
+            answer = llm.ask(q, tcfg, system_override=sys_prompt,
+                             history=hist, allow_web=True)
         except Exception as exc:
             log.warning("/ai (telegram) failed: %s", exc)
             self._send(chat, f"ИИ недоступен: {exc}")
             return
         self._send_long(chat, answer, parse_mode="HTML")
+        self._ai_remember(chat, q, answer)
         self._handled += 1
+
+    def _cmd_forget(self, _arg, chat=None):
+        if self._memory_turns() <= 0:
+            return "Память /ai выключена (её нечего очищать)."
+        had = self._ai_forget(chat)
+        return "🧹 Память /ai очищена — следующий вопрос без контекста." if had \
+            else "Память /ai и так пуста."
 
     def _nodes(self) -> list[dict]:
         try:
@@ -644,10 +738,32 @@ class TelegramCommandBot:
             "📡 /say <текст> — отправить в mesh (broadcast)\n"
             "📢 /announce <текст> — объявление всем подписчикам\n"
             "📊 /status — состояние бота\n"
+            f"🧠 /aimemory — память /ai (сейчас: {self._memory_turns() or 'выкл'})\n"
             "📤 /sendreport — разослать ежедневный отчёт сейчас\n"
             "♻️ /restart — перезапустить бота\n\n"
             f"👥 Подписчиков: 🔔 {n_alerts} · 📅 {n_daily}"
         )
+
+    def _cmd_aimemory(self, arg, chat=None):
+        deny = self._admin_only(chat)
+        if deny:
+            return deny
+        arg = (arg or "").strip()
+        if not arg:
+            n = self._memory_turns()
+            state = f"{n} обмен(ов)" if n > 0 else "выключена"
+            return (f"🧠 Память /ai сейчас: {state}.\n"
+                    f"Изменить: /aimemory <0..{AI_MEM_MAX_TURNS}> (0 — выключить).\n"
+                    f"Бот помнит последние N пар «вопрос-ответ» в каждом чате; "
+                    f"забывает после {AI_MEM_TTL // 60} мин простоя или по /forget.")
+        try:
+            n = int(arg)
+        except ValueError:
+            return "Нужно число. Пример: /aimemory 5 (или 0, чтобы выключить)."
+        n = max(0, min(n, AI_MEM_MAX_TURNS))
+        self._settings["ai_memory_turns"] = n
+        self._save_settings()
+        return f"✅ Память /ai: {'выключена' if n == 0 else str(n) + ' обмен(ов)'}."
 
     def _cmd_say(self, arg, chat=None):
         deny = self._admin_only(chat)

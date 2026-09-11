@@ -338,7 +338,7 @@ def ask(question: str, cfg: dict[str, Any], system_override: Optional[str] = Non
     if web:
         sys_content += _WEB_HINT
     messages: list[dict[str, Any]] = [{"role": "system", "content": sys_content}]
-    for h in (history or [])[-8:]:
+    for h in (history or [])[-16:]:
         role = h.get("role")
         content = (h.get("content") or "").strip()
         if role in ("user", "assistant") and content:
