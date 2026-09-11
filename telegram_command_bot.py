@@ -19,7 +19,9 @@ Phase 3 (/traffic) build on this.
 """
 from __future__ import annotations
 
+import html as _html
 import logging
+import re
 import threading
 import time
 from typing import Any, Callable, Optional
@@ -32,6 +34,44 @@ import commands
 log = logging.getLogger(__name__)
 
 TG_API = "https://api.telegram.org"
+
+# --- Markdown (LLM output) -> Telegram HTML ------------------------------
+# The LLM answers in GitHub-flavoured Markdown (**bold**, ## headings, `code`,
+# [text](url)). Telegram doesn't render that as-is, so translate the subset
+# Telegram HTML supports (<b>/<i>/<code>/<pre>/<a>). Everything else is escaped.
+_MD_FENCE = re.compile(r"```[^\n]*\n(.*?)```", re.DOTALL)
+_MD_INLINE_CODE = re.compile(r"`([^`\n]+)`")
+_MD_HEADER = re.compile(r"^\s{0,3}#{1,6}\s*(.+?)\s*#*\s*$", re.MULTILINE)
+_MD_BOLD = re.compile(r"\*\*(.+?)\*\*", re.DOTALL)
+_MD_BULLET = re.compile(r"^(\s*)[\*\-\+]\s+", re.MULTILINE)
+_MD_ITALIC = re.compile(r"\*(?!\s)([^\*\n]+?)\*")
+_MD_LINK = re.compile(r"\[([^\]\n]+?)\]\((https?://[^\s)]+)\)")
+
+
+def _md_to_tg_html(md: str) -> str:
+    """Convert a subset of Markdown to Telegram-safe HTML."""
+    md = md or ""
+    stash: list[str] = []
+
+    def _keep(fragment: str) -> str:
+        stash.append(fragment)
+        return f"\x00{len(stash) - 1}\x00"
+
+    # Code first (so its contents survive escaping / inline rules untouched).
+    md = _MD_FENCE.sub(
+        lambda m: _keep(f"<pre>{_html.escape(m.group(1).rstrip(chr(10)))}</pre>"), md)
+    md = _MD_INLINE_CODE.sub(
+        lambda m: _keep(f"<code>{_html.escape(m.group(1))}</code>"), md)
+    # Escape the remaining plain text, then re-introduce our own markup.
+    md = _html.escape(md, quote=False)
+    md = _MD_HEADER.sub(lambda m: f"<b>{m.group(1)}</b>", md)
+    md = _MD_BOLD.sub(lambda m: f"<b>{m.group(1)}</b>", md)
+    md = _MD_BULLET.sub(lambda m: f"{m.group(1)}• ", md)
+    md = _MD_ITALIC.sub(lambda m: f"<i>{m.group(1)}</i>", md)
+    md = _MD_LINK.sub(lambda m: f'<a href="{_html.escape(m.group(2), quote=True)}">{m.group(1)}</a>', md)
+    for i, frag in enumerate(stash):
+        md = md.replace(f"\x00{i}\x00", frag)
+    return md
 
 
 def _proxies_from(cfg_load: Callable[[], dict]) -> Optional[dict]:
@@ -166,13 +206,19 @@ class TelegramCommandBot:
         self._call("sendMessage", {"chat_id": chat_id, "text": text[:4000],
                                    "disable_web_page_preview": True})
 
-    def _send_long(self, chat_id, text: str):
-        """Send a long reply split into Telegram-sized chunks (no truncation)."""
+    def _send_long(self, chat_id, text: str, parse_mode: Optional[str] = None):
+        """Send a long reply split into Telegram-sized chunks (no truncation).
+
+        With parse_mode="HTML" each chunk is converted from Markdown to Telegram
+        HTML; if Telegram rejects the entities the chunk is resent as plain text
+        so the content is never lost to a formatting error.
+        """
         text = (text or "").strip()
         if not text:
             self._send(chat_id, "(пустой ответ)")
             return
-        LIMIT = 3900
+        # HTML tags inflate length, so leave headroom under the 4096 hard limit.
+        LIMIT = 3500 if parse_mode == "HTML" else 3900
         while text:
             if len(text) <= LIMIT:
                 chunk, text = text, ""
@@ -183,8 +229,17 @@ class TelegramCommandBot:
                 if cut < LIMIT // 2:
                     cut = LIMIT
                 chunk, text = text[:cut], text[cut:].lstrip("\n")
-            self._call("sendMessage", {"chat_id": chat_id, "text": chunk,
-                                       "disable_web_page_preview": True})
+            params = {"chat_id": chat_id, "disable_web_page_preview": True}
+            if parse_mode == "HTML":
+                params["text"] = _md_to_tg_html(chunk)
+                params["parse_mode"] = "HTML"
+                if self._call("sendMessage", params) is None:
+                    # Bad entities -> resend the raw chunk without formatting.
+                    self._call("sendMessage", {"chat_id": chat_id, "text": chunk,
+                                               "disable_web_page_preview": True})
+            else:
+                params["text"] = chunk
+                self._call("sendMessage", params)
 
     def _drain_backlog(self):
         """Skip messages that arrived before the bot came up."""
@@ -336,7 +391,7 @@ class TelegramCommandBot:
             log.warning("/ai (telegram) failed: %s", exc)
             self._send(chat, f"ИИ недоступен: {exc}")
             return
-        self._send_long(chat, answer)
+        self._send_long(chat, answer, parse_mode="HTML")
         self._handled += 1
 
     def _nodes(self) -> list[dict]:
