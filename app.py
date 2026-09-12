@@ -55,7 +55,7 @@ logging.basicConfig(
 )
 log = logging.getLogger("weather-mesh-bridge")
 
-VERSION = "2.22.0"
+VERSION = "2.22.1"
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "config.json"
@@ -393,6 +393,49 @@ def _mirror_to_meshcore(text: str, _channel_index: int) -> None:
         log.exception("MeshCore mirror failed")
 
 
+def _mc_short_age(sec: int) -> str:
+    sec = max(0, int(sec))
+    if sec < 3600:
+        return f"{sec // 60}м"
+    if sec < 86400:
+        return f"{sec // 3600}ч"
+    return f"{sec // 86400}д"
+
+
+def _meshcore_nodes_reply() -> str:
+    """`/nodes` from a MeshCore channel must list MeshCore contacts — NOT the
+    Meshtastic nodes the shared cmd_nodes returns."""
+    try:
+        contacts = MESHCORE.list_contacts(refresh=True) or []
+    except Exception:
+        contacts = []
+    if not contacts:
+        return "📡 MeshCore: контактов пока нет."
+    now = int(time.time())
+    window = 2 * 3600
+    reps = sum(1 for c in contacts if c.get("type") == 2)
+
+    def age(c) -> int:
+        try:
+            la = int(c.get("last_advert") or 0)
+        except (TypeError, ValueError):
+            la = 0
+        return (now - la) if la else 10 ** 9
+
+    fresh = sorted(
+        ((c.get("adv_name") or "?", age(c), c.get("type")) for c in contacts),
+        key=lambda r: r[1])
+    fresh = [r for r in fresh if r[1] <= window]
+    head = f"📡 MeshCore: {len(contacts)} узлов ({reps} реп.), активны 2ч: {len(fresh)}"
+    if not fresh:
+        return head
+    shown = fresh[:6]
+    parts = [f"{'📻' if t == 2 else ('🏠' if t == 3 else '')}{name} ({_mc_short_age(a)})"
+             for name, a, t in shown]
+    tail = f" …ещё {len(fresh) - len(shown)}" if len(fresh) > len(shown) else ""
+    return head + "\n" + ", ".join(parts) + tail
+
+
 def _handle_meshcore_command(text: str, channel_index: int,
                              meta: Optional[dict[str, Any]] = None) -> Optional[str]:
     """Command handler for incoming MeshCore channel messages (!ping, !w, …).
@@ -401,6 +444,11 @@ def _handle_meshcore_command(text: str, channel_index: int,
     cfg = load_config()
     if not bool((cfg.get("commands") or {}).get("enabled", True)):
         return None
+    # `nodes` must be answered with MeshCore contacts, not Meshtastic nodes
+    # (the shared cmd_nodes reads the Heltec interface).
+    first = (text.lstrip("!/ ").split(" ", 1)[0] or "").strip().lower()
+    if first in ("nodes", "узлы", "ноды"):
+        return _meshcore_nodes_reply()
     msg = {"text": text, **(meta or {})}
     return commands.handle(msg, bridge=BRIDGE, cfg=cfg)
 
