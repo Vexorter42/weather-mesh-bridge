@@ -55,7 +55,7 @@ logging.basicConfig(
 )
 log = logging.getLogger("weather-mesh-bridge")
 
-VERSION = "2.22.1"
+VERSION = "2.22.2"
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "config.json"
@@ -551,16 +551,20 @@ def _relay_is_new(channel: str, sender: str, text: str,
     return True
 
 
-def _relay_send(chan_name: str, sender: str, text: str) -> None:
+def _relay_send(chan_name: str, sender: str, text: str,
+                source: str = "companion") -> None:
     """Post one message to the relay Telegram group (separate bot, retries, topic
-    support). Never logs the exception object — it holds the URL with the token."""
+    support). Never logs the exception object — it holds the URL with the token.
+    `source` marks the origin: 📟 = heard over the air by our node (companion),
+    🌐 = seen via the internet packet API (meshcoretel)."""
     mc = (load_config().get("meshcore") or {})
     token = (mc.get("tg_relay_token") or "").strip()
     chat_id = (mc.get("tg_relay_chat_id") or "").strip()
     if not token or not chat_id:
         return
-    # Format (HTML): node name (bold, linked to its meshcoretel page) · channel,
-    # then the message text below.
+    icon = "🌐" if source == "meshcoretel" else "📟"
+    # Format (HTML): source icon + node name (bold, linked to its meshcoretel
+    # page) · channel, then the message text below.
     esc_text = html.escape(text or "")
     if sender:
         name = html.escape(sender)
@@ -571,12 +575,12 @@ def _relay_send(chan_name: str, sender: str, text: str) -> None:
             if pk:
                 url = tpl.replace("{pubkey}", pk).replace("{region}", region)
                 name = f'<a href="{html.escape(url)}">{name}</a>'
-        head = f"<b>{name}</b>"
+        head = f"{icon} <b>{name}</b>"
         if chan_name:
             head += f" · {html.escape(chan_name)}"
         body = f"{head}\n{esc_text}"
     else:
-        body = esc_text
+        body = f"{icon} {esc_text}"
     params = {"chat_id": chat_id, "text": body[:4000], "disable_web_page_preview": True,
               "parse_mode": "HTML"}
     topic = (mc.get("tg_relay_topic_id") or "").strip()
@@ -611,7 +615,7 @@ def _relay_meshcore_to_tg(chan_name: str, sender: str, text: str) -> None:
         return                              # channel not in the relay list
     if not _relay_is_new(chan_name, sender, text):
         return                              # already forwarded (e.g. via meshcoretel)
-    _relay_send(chan_name, sender, text)
+    _relay_send(chan_name, sender, text, source="companion")
 
 
 def _start_meshcoretel_relay(interval_seconds: int = 15) -> threading.Thread:
@@ -667,7 +671,7 @@ def _start_meshcoretel_relay(interval_seconds: int = 15) -> threading.Thread:
                             snd = it.get("sender_name") or ""
                             if not _relay_is_new(ch, snd, txt):
                                 continue                    # already sent by the companion
-                            _relay_send(ch, snd, txt)
+                            _relay_send(ch, snd, txt, source="meshcoretel")
                             relayed += 1
                         if first:
                             log.info("meshcoretel relay: seeded %d msgs (region %s)", len(seen), region)
